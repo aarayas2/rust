@@ -79,6 +79,13 @@ pub const ID_EDIT_SELECTALL: u32 = 0x19;
 pub const ID_EDIT_TIMEDATE: u32 = 0x1A;
 pub const ID_EDIT_BINGSEARCH: u32 = 0x1C;
 
+// Multi-Cursor & Block Selection Command IDs
+pub const ID_EDIT_ADD_CURSOR_ABOVE: u32 = 0x50;
+pub const ID_EDIT_ADD_CURSOR_BELOW: u32 = 0x51;
+pub const ID_EDIT_ADD_CURSOR_NEXT_MATCH: u32 = 0x52;
+pub const ID_EDIT_ADD_CURSORS_LINE_ENDS: u32 = 0x53;
+pub const ID_EDIT_SINGLE_CURSOR: u32 = 0x54;
+
 // Notepad View & Help Command IDs
 pub const ID_VIEW_STATUS: u32 = 0x1B;
 pub const IDM_HELP_ABOUT: u32 = 0x41;
@@ -159,6 +166,37 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
             MF_STRING,
             ID_EDIT_TIMEDATE as usize,
             "Time/&Date\tF5",
+        );
+        let _ = AppendMenuW(edit_menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_menu_str(
+            edit_menu,
+            MF_STRING,
+            ID_EDIT_ADD_CURSOR_ABOVE as usize,
+            "Add Cursor &Above\tCtrl+Alt+Up",
+        );
+        append_menu_str(
+            edit_menu,
+            MF_STRING,
+            ID_EDIT_ADD_CURSOR_BELOW as usize,
+            "Add Cursor &Below\tCtrl+Alt+Down",
+        );
+        append_menu_str(
+            edit_menu,
+            MF_STRING,
+            ID_EDIT_ADD_CURSOR_NEXT_MATCH as usize,
+            "Add Cursor at Next &Match\tCtrl+D",
+        );
+        append_menu_str(
+            edit_menu,
+            MF_STRING,
+            ID_EDIT_ADD_CURSORS_LINE_ENDS as usize,
+            "Add Cursors to Line &Ends\tAlt+Shift+I",
+        );
+        append_menu_str(
+            edit_menu,
+            MF_STRING,
+            ID_EDIT_SINGLE_CURSOR as usize,
+            "Collapse to &Single Cursor\tEsc",
         );
         append_menu_str(menu_bar, MF_POPUP, edit_menu.0 as usize, "&Edit");
 

@@ -1,5 +1,6 @@
 //! Reverse-engineered Notepad Window Procedure (`NPWndProc`), Class Registration (`NPRegister`),
-//! Child Control Lifecycle (`NPInit` / `NPSize`), and Command Dispatch (`NPCommand`).
+//! Child Control Lifecycle (`NPInit` / `NPSize`), Command Dispatch (`NPCommand`),
+//! and Multi-Cursor / Block Selection Subclass & GDI Overlay Renderer.
 //!
 //! # Reverse Engineering Notes
 //!
@@ -21,6 +22,9 @@
 //!     then invokes `NPCommand` (`0x14000DA7C`).
 //!   - `WM_INITMENU` (`0x0116`) -> `0x14000ED6D`: invokes `InitMenu` (`0x14000F2A0`).
 
+use crate::cursor::{
+    byte_to_utf16_offset, utf16_to_byte_offset, BlockDirection, MoveDirection, MultiCursorEditor,
+};
 use crate::file_io::{
     get_edit_text, is_edit_modified, load_file_win32, save_file_win32, set_edit_modified,
     set_edit_text, TextEncoding,
@@ -28,27 +32,36 @@ use crate::file_io::{
 use crate::menu::{
     create_notepad_menu, init_menu, EditorState, EM_GETSEL, EM_REPLACESEL, EM_SCROLLCARET,
     EM_SETSEL, EM_UNDO, IDM_FILEEXIT, IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, IDM_FILESAVEAS,
-    IDM_HELP_ABOUT, ID_EDIT_CLEAR, ID_EDIT_COPY, ID_EDIT_CUT, ID_EDIT_PASTE, ID_EDIT_SELECTALL,
-    ID_EDIT_TIMEDATE, ID_EDIT_UNDO, ID_VIEW_STATUS,
+    IDM_HELP_ABOUT, ID_EDIT_ADD_CURSORS_LINE_ENDS, ID_EDIT_ADD_CURSOR_ABOVE,
+    ID_EDIT_ADD_CURSOR_BELOW, ID_EDIT_ADD_CURSOR_NEXT_MATCH, ID_EDIT_CLEAR, ID_EDIT_COPY,
+    ID_EDIT_CUT, ID_EDIT_PASTE, ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE,
+    ID_EDIT_UNDO, ID_VIEW_STATUS,
 };
 use crate::save_dialog::{OpenFileDialog, SaveFileDialog};
-use crate::word_wrap::{
-    create_edit_control, WordWrap, WordWrapManager, ID_FORMAT_WORDWRAP,
-};
+use crate::word_wrap::{create_edit_control, WordWrap, WordWrapManager, ID_FORMAT_WORDWRAP};
 use std::path::PathBuf;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{GetStockObject, COLOR_WINDOW, DEFAULT_GUI_FONT, HBRUSH};
+use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    CreateSolidBrush, DeleteObject, FillRect, GetDC, GetStockObject, GetTextMetricsW,
+    InvalidateRect, InvertRect, ReleaseDC, SelectObject, COLOR_WINDOW, DEFAULT_GUI_FONT, HBRUSH,
+    HGDIOBJ, TEXTMETRICW,
+};
 use windows::Win32::System::SystemInformation::GetLocalTime;
-use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    GetKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
+    VK_LEFT, VK_MENU, VK_RIGHT, VK_SHIFT, VK_UP,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowLongPtrW, IsIconic,
-    LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage,
-    RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowTextW, ShowWindow, CW_USEDEFAULT,
-    GWLP_USERDATA, HMENU, IDC_IBEAM, IDI_APPLICATION, IDNO, IDYES, MB_ICONINFORMATION,
-    MB_ICONWARNING, MB_OK, MB_YESNOCANCEL, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_CLEAR, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CUT, WM_DESTROY, WM_INITMENU, WM_PASTE,
-    WM_SETFOCUS, WM_SETFONT, WM_SIZE, WNDCLASSEXW, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
+    GetWindowLongPtrW, IsIconic, LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, PostMessageW,
+    PostQuitMessage, RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
+    CW_USEDEFAULT, GWLP_USERDATA, GWLP_WNDPROC, HMENU, IDC_IBEAM, IDI_APPLICATION, IDNO, IDYES,
+    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNOCANCEL, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WM_CHAR, WM_CLEAR, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CUT, WM_DESTROY,
+    WM_GETFONT, WM_INITMENU, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
+    WM_PASTE, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC,
+    WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 /// Window Class Name (`0x14002B828`: `"Notepad"`).
@@ -66,6 +79,15 @@ pub const EN_CHANGE: u16 = 0x0300;
 /// Edit control message to set maximum text length (`EM_LIMITTEXT = 0x00C5`).
 pub const EM_LIMITTEXT: u32 = 0x00C5;
 
+/// Edit control message to query client `(x, y)` coordinates of a character index (`EM_POSFROMCHAR = 0x00D6`).
+pub const EM_POSFROMCHAR: u32 = 0x00D6;
+
+/// Edit control message to query nearest character index from client `(x, y)` coordinates (`EM_CHARFROMPOS = 0x00D7`).
+pub const EM_CHARFROMPOS: u32 = 0x00D7;
+
+/// Mouse button state mask for Left Mouse Button (`MK_LBUTTON = 0x0001`).
+const MK_LBUTTON_MASK: usize = 0x0001;
+
 /// Complete runtime state for a Notepad window instance, stored safely in `GWLP_USERDATA`.
 pub struct NotepadAppState {
     pub hinstance: HINSTANCE,
@@ -76,6 +98,16 @@ pub struct NotepadAppState {
     pub status_bar_visible: bool,
     pub current_file: Option<PathBuf>,
     pub encoding: TextEncoding,
+    /// Multi-cursor and rectangular block-selection state engine.
+    pub multi_cursor: MultiCursorEditor,
+    /// Original Win32 `WndProc` of the subclassed `"Edit"` control.
+    pub edit_prev_wndproc: isize,
+    /// Origin byte offset when performing an `Alt+Drag` rectangular block selection.
+    pub alt_drag_origin: Option<usize>,
+    /// Internal clipboard buffer for multi-cursor and rectangular block selections.
+    pub internal_clipboard: Option<String>,
+    /// Guard flag to avoid recursive `EN_CHANGE` resynchronization while applying multi-cursor edits.
+    pub syncing_to_hwnd: bool,
 }
 
 impl NotepadAppState {
@@ -94,6 +126,77 @@ impl NotepadAppState {
         } else {
             0
         }
+    }
+
+    /// Synchronizes `self.multi_cursor` from the native `hwnd_edit` control when in single-cursor mode.
+    pub fn sync_from_hwnd_edit(&mut self) {
+        if self.syncing_to_hwnd || self.hwnd_edit.is_invalid() {
+            return;
+        }
+        let current_text = get_edit_text(self.hwnd_edit);
+        let mut sel_start: u32 = 0;
+        let mut sel_end: u32 = 0;
+        unsafe {
+            SendMessageW(
+                self.hwnd_edit,
+                EM_GETSEL,
+                Some(WPARAM(&mut sel_start as *mut u32 as usize)),
+                Some(LPARAM(&mut sel_end as *mut u32 as isize)),
+            );
+        }
+        self.multi_cursor.sync_from_single_selection(
+            current_text,
+            sel_start as usize,
+            sel_end as usize,
+        );
+    }
+
+    /// Pushes the current `self.multi_cursor` text buffer and primary caret/selection to `hwnd_edit`.
+    pub fn sync_to_hwnd_edit(&mut self, mark_modified: bool) {
+        if self.hwnd_edit.is_invalid() {
+            return;
+        }
+        self.syncing_to_hwnd = true;
+
+        let current_hwnd_text = get_edit_text(self.hwnd_edit);
+        let target_text = self.multi_cursor.text();
+        if current_hwnd_text != target_text {
+            set_edit_text(self.hwnd_edit, target_text);
+            if mark_modified {
+                set_edit_modified(self.hwnd_edit, true);
+            }
+        }
+
+        let primary = self.multi_cursor.cursors.primary();
+        let (sel_start_byte, sel_end_byte) = if self.multi_cursor.cursors.is_multi()
+            || self.multi_cursor.cursors.has_block_selection()
+        {
+            // When multiple cursors or custom block selection are active, collapse the native
+            // single-selection highlight so our custom GDI overlay renders all selections cleanly.
+            (primary.position, primary.position)
+        } else if let Some(anchor) = primary.anchor {
+            (anchor, primary.position)
+        } else {
+            (primary.position, primary.position)
+        };
+
+        let start_u16 = byte_to_utf16_offset(self.multi_cursor.text(), sel_start_byte);
+        let end_u16 = byte_to_utf16_offset(self.multi_cursor.text(), sel_end_byte);
+
+        unsafe {
+            SendMessageW(
+                self.hwnd_edit,
+                EM_SETSEL,
+                Some(WPARAM(start_u16)),
+                Some(LPARAM(end_u16 as isize)),
+            );
+            SendMessageW(self.hwnd_edit, EM_SCROLLCARET, None, None);
+            let _ = InvalidateRect(Some(self.hwnd_edit), None, false);
+        }
+
+        self.syncing_to_hwnd = false;
+        self.update_window_title();
+        self.update_status_bar();
     }
 
     /// Updates the main window title bar (`UpdateTitle` at `0x14000FE3C`), prefixing `*` when dirty.
@@ -117,40 +220,69 @@ impl NotepadAppState {
         }
     }
 
-    /// Updates the status bar text (`Ln X, Col Y | UTF-8 | Windows (CRLF)`).
+    /// Updates the status bar text (`Ln X, Col Y | [Cursors/Block] | 100% | Windows (CRLF) | UTF-8`).
     pub fn update_status_bar(&self) {
         if self.hwnd_status.is_invalid() || !self.status_bar_visible {
             return;
         }
 
-        let mut sel_start: u32 = 0;
-        let mut sel_end: u32 = 0;
-        unsafe {
-            SendMessageW(
-                self.hwnd_edit,
-                EM_GETSEL,
-                Some(WPARAM(&mut sel_start as *mut u32 as usize)),
-                Some(LPARAM(&mut sel_end as *mut u32 as isize)),
+        let (line, col) = if self.multi_cursor.cursors.is_multi()
+            || self.multi_cursor.cursors.has_block_selection()
+        {
+            let pos = self.multi_cursor.cursors.primary().position;
+            let pos_2d = self.multi_cursor.byte_to_2d(pos);
+            let col_display = self
+                .multi_cursor
+                .cursors
+                .primary()
+                .sticky_column
+                .unwrap_or(pos_2d.column)
+                + 1;
+            (pos_2d.line + 1, col_display)
+        } else {
+            let mut sel_start: u32 = 0;
+            let mut sel_end: u32 = 0;
+            unsafe {
+                SendMessageW(
+                    self.hwnd_edit,
+                    EM_GETSEL,
+                    Some(WPARAM(&mut sel_start as *mut u32 as usize)),
+                    Some(LPARAM(&mut sel_end as *mut u32 as isize)),
+                );
+            }
+
+            let text = get_edit_text(self.hwnd_edit);
+            let prefix: String = text.encode_utf16().take(sel_end as usize).fold(
+                String::new(),
+                |mut acc, ch| {
+                    if let Some(c) = char::from_u32(ch as u32) {
+                        acc.push(c);
+                    }
+                    acc
+                },
             );
-        }
 
-        let text = get_edit_text(self.hwnd_edit);
-        let prefix: String = text.encode_utf16().take(sel_end as usize).fold(
-            String::new(),
-            |mut acc, ch| {
-                if let Some(c) = char::from_u32(ch as u32) {
-                    acc.push(c);
-                }
-                acc
-            },
-        );
+            let line = prefix.matches('\n').count() + 1;
+            let col = prefix
+                .rsplit('\n')
+                .next()
+                .map(|s| s.trim_end_matches('\r').chars().count() + 1)
+                .unwrap_or(1);
+            (line, col)
+        };
 
-        let line = prefix.matches('\n').count() + 1;
-        let col = prefix
-            .rsplit('\n')
-            .next()
-            .map(|s| s.trim_end_matches('\r').chars().count() + 1)
-            .unwrap_or(1);
+        let mode_badge = if self.multi_cursor.cursors.has_block_selection() {
+            let ctx = self.multi_cursor.selection_context();
+            if let Some(&(sl, sc, el, ec)) = ctx.block_rects.first() {
+                format!("   |   Block {}x{}", el - sl + 1, ec.saturating_sub(sc))
+            } else {
+                "   |   Block Selection".to_string()
+            }
+        } else if self.multi_cursor.cursors.is_multi() {
+            format!("   |   {} Cursors", self.multi_cursor.cursors.count())
+        } else {
+            String::new()
+        };
 
         let enc_label = match self.encoding {
             TextEncoding::Utf8 => "UTF-8",
@@ -160,8 +292,8 @@ impl NotepadAppState {
         };
 
         let status_str = format!(
-            "  Ln {}, Col {}   |   100%   |   Windows (CRLF)   |   {}\0",
-            line, col, enc_label
+            "  Ln {}, Col {}{}   |   100%   |   Windows (CRLF)   |   {}\0",
+            line, col, mode_badge, enc_label
         );
         let wide: Vec<u16> = status_str.encode_utf16().collect();
         unsafe {
@@ -226,6 +358,7 @@ impl NotepadAppState {
             return;
         }
         set_edit_text(self.hwnd_edit, "");
+        self.multi_cursor.set_text("");
         self.current_file = None;
         self.encoding = TextEncoding::Utf8;
         self.update_window_title();
@@ -271,6 +404,7 @@ impl NotepadAppState {
                     self.insert_date_time(true);
                 }
 
+                self.multi_cursor.set_text(get_edit_text(self.hwnd_edit));
                 self.update_window_title();
                 self.update_status_bar();
                 Ok(())
@@ -329,20 +463,29 @@ impl NotepadAppState {
     }
 
     /// Inserts current time and date (`InsertDateTime` at `0x140010580`, called on `ID_EDIT_TIMEDATE` = `0x1A`).
-    pub fn insert_date_time(&self, leading_newline: bool) {
+    pub fn insert_date_time(&mut self, leading_newline: bool) {
         let st = unsafe { GetLocalTime() };
-        let stamp = if leading_newline {
+        let stamp_clean = if leading_newline {
             format!(
-                "\r\n{:02}:{:02} {:02}/{:02}/{:04}\r\n\0",
+                "\r\n{:02}:{:02} {:02}/{:02}/{:04}\r\n",
                 st.wHour, st.wMinute, st.wMonth, st.wDay, st.wYear
             )
         } else {
             format!(
-                "{:02}:{:02} {:02}/{:02}/{:04}\0",
+                "{:02}:{:02} {:02}/{:02}/{:04}",
                 st.wHour, st.wMinute, st.wMonth, st.wDay, st.wYear
             )
         };
-        let wide: Vec<u16> = stamp.encode_utf16().collect();
+
+        if self.multi_cursor.cursors.is_multi() || self.multi_cursor.cursors.has_block_selection() {
+            self.multi_cursor.insert_text(&stamp_clean);
+            self.sync_to_hwnd_edit(true);
+            return;
+        }
+
+        let mut stamp_nul = stamp_clean;
+        stamp_nul.push('\0');
+        let wide: Vec<u16> = stamp_nul.encode_utf16().collect();
         unsafe {
             SendMessageW(
                 self.hwnd_edit,
@@ -351,6 +494,313 @@ impl NotepadAppState {
                 Some(LPARAM(wide.as_ptr() as isize)),
             );
         }
+        self.sync_from_hwnd_edit();
+    }
+
+    // =========================================================================
+    // Multi-Cursor & Block Selection Command Handlers
+    // =========================================================================
+
+    /// Adds a cursor directly above the topmost cursor (`Ctrl+Alt+Up`).
+    pub fn cmd_add_cursor_above(&mut self) {
+        self.sync_from_hwnd_edit();
+        if self.multi_cursor.add_cursor_above().is_some() {
+            self.sync_to_hwnd_edit(false);
+        }
+    }
+
+    /// Adds a cursor directly below the bottommost cursor (`Ctrl+Alt+Down`).
+    pub fn cmd_add_cursor_below(&mut self) {
+        self.sync_from_hwnd_edit();
+        if self.multi_cursor.add_cursor_below().is_some() {
+            self.sync_to_hwnd_edit(false);
+        }
+    }
+
+    /// Selects the word under the cursor or adds a cursor at the next match (`Ctrl+D`).
+    pub fn cmd_add_cursor_next_match(&mut self) {
+        self.sync_from_hwnd_edit();
+        if self.multi_cursor.add_cursor_at_next_match().is_some() {
+            self.sync_to_hwnd_edit(false);
+        }
+    }
+
+    /// Splits the current multi-line selection into cursors at the end of each line (`Alt+Shift+I`).
+    pub fn cmd_add_cursors_to_line_ends(&mut self) {
+        self.sync_from_hwnd_edit();
+        self.multi_cursor.add_cursors_to_line_ends();
+        self.sync_to_hwnd_edit(false);
+    }
+
+    /// Collapses secondary cursors and clears block selection (`Esc`).
+    pub fn cmd_collapse_cursors(&mut self) {
+        self.multi_cursor.collapse_to_primary_cursor();
+        self.sync_to_hwnd_edit(false);
+    }
+
+    /// Extends a rectangular block selection in `direction` (`Shift+Alt+Arrows`).
+    pub fn cmd_block_select(&mut self, direction: BlockDirection) {
+        self.sync_from_hwnd_edit();
+        self.multi_cursor.block_select(direction);
+        self.sync_to_hwnd_edit(false);
+    }
+
+    /// Moves all active cursors in `direction` (`Arrows` / `Home` / `End`).
+    pub fn cmd_multi_move(&mut self, direction: MoveDirection, extend_selection: bool) {
+        self.multi_cursor.move_cursors(direction, extend_selection);
+        self.sync_to_hwnd_edit(false);
+    }
+
+    /// Inserts a character or newline across all active cursors or block selection.
+    pub fn cmd_multi_insert_char(&mut self, ch: char) {
+        let insert_str = if ch == '\r' || ch == '\n' {
+            "\r\n".to_string()
+        } else {
+            ch.to_string()
+        };
+        self.multi_cursor.insert_text(&insert_str);
+        self.sync_to_hwnd_edit(true);
+    }
+
+    /// Performs `Backspace` across all active cursors or block selection.
+    pub fn cmd_multi_backspace(&mut self) {
+        self.multi_cursor.delete_backward();
+        self.sync_to_hwnd_edit(true);
+    }
+
+    /// Performs `Delete` across all active cursors or block selection.
+    pub fn cmd_multi_delete(&mut self) {
+        self.multi_cursor.delete_forward();
+        self.sync_to_hwnd_edit(true);
+    }
+
+    /// Renders multiple carets, secondary stream selections, and rectangular block selections
+    /// onto `hwnd_edit` after its native `WM_PAINT` completes.
+    pub unsafe fn render_multi_cursor_and_block_overlays(&self) {
+        if self.hwnd_edit.is_invalid() {
+            return;
+        }
+        if !self.multi_cursor.cursors.is_multi()
+            && !self.multi_cursor.cursors.has_block_selection()
+        {
+            return;
+        }
+
+        let hdc = GetDC(Some(self.hwnd_edit));
+        if hdc.is_invalid() {
+            return;
+        }
+
+        // Select the Edit control's active font into the DC so TEXTMETRICW matches exactly
+        let hfont = SendMessageW(self.hwnd_edit, WM_GETFONT, None, None);
+        let old_font = if hfont.0 != 0 {
+            SelectObject(hdc, HGDIOBJ(hfont.0 as *mut core::ffi::c_void))
+        } else {
+            HGDIOBJ::default()
+        };
+
+        let mut tm = TEXTMETRICW::default();
+        let _ = GetTextMetricsW(hdc, &mut tm);
+        let line_height = tm.tmHeight.max(14);
+        let ave_char_width = tm.tmAveCharWidth.max(7);
+
+        let ctx = self.multi_cursor.selection_context();
+        let line_ranges = self.multi_cursor.line_content_ranges();
+
+        // 1. Render Rectangular Block Selections (`ctx.block_rects`)
+        for &(start_line, start_col, end_line, end_col) in &ctx.block_rects {
+            for line_idx in start_line..=end_line {
+                if let Some(line_range) = line_ranges.get(line_idx) {
+                    let line_str = &self.multi_cursor.text()[line_range.clone()];
+                    let line_chars: Vec<char> = line_str.chars().collect();
+                    let line_char_len = line_chars.len();
+
+                    let actual_sc = start_col.min(line_char_len);
+                    let actual_ec = end_col.min(line_char_len);
+                    let virtual_sc = start_col.saturating_sub(line_char_len);
+                    let virtual_ec = end_col.saturating_sub(line_char_len);
+
+                    let sc_byte_rel: usize = line_chars[..actual_sc]
+                        .iter()
+                        .map(|c| c.len_utf8())
+                        .sum();
+                    let ec_byte_rel: usize = line_chars[..actual_ec]
+                        .iter()
+                        .map(|c| c.len_utf8())
+                        .sum();
+
+                    let (base_sc_x, line_y) =
+                        self.char_byte_to_client_xy(line_range.start + sc_byte_rel, line_height);
+                    let (base_ec_x, _) =
+                        self.char_byte_to_client_xy(line_range.start + ec_byte_rel, line_height);
+
+                    let x1 = base_sc_x + (virtual_sc as i32) * ave_char_width;
+                    let x2 = base_ec_x + (virtual_ec as i32) * ave_char_width;
+
+                    if x2 > x1 {
+                        let rect = RECT {
+                            left: x1,
+                            top: line_y,
+                            right: x2,
+                            bottom: line_y + line_height,
+                        };
+                        let _ = InvertRect(hdc, &rect);
+                    }
+
+                    // Draw a per-line block edge caret bar at the active column
+                    let active_col = self
+                        .multi_cursor
+                        .cursors
+                        .primary()
+                        .sticky_column
+                        .unwrap_or(end_col);
+                    let caret_x = if active_col <= start_col { x1 } else { x2 };
+                    let caret_brush = CreateSolidBrush(COLORREF(0x00D7_7800)); // Accent blue (BGR)
+                    let caret_rect = RECT {
+                        left: caret_x,
+                        top: line_y,
+                        right: caret_x + 2,
+                        bottom: line_y + line_height,
+                    };
+                    let _ = FillRect(hdc, &caret_rect, caret_brush);
+                    let _ = DeleteObject(HGDIOBJ(caret_brush.0));
+                }
+            }
+        }
+
+        // 2. Render Multi-Cursor Stream Selections (`ctx.ranges`)
+        for range in &ctx.ranges {
+            let start_2d = self.multi_cursor.byte_to_2d(range.start);
+            let end_2d = self.multi_cursor.byte_to_2d(range.end);
+            for line_idx in start_2d.line..=end_2d.line {
+                if let Some(line_range) = line_ranges.get(line_idx) {
+                    let seg_start = if line_idx == start_2d.line {
+                        range.start
+                    } else {
+                        line_range.start
+                    };
+                    let seg_end = if line_idx == end_2d.line {
+                        range.end
+                    } else {
+                        line_range.end
+                    };
+                    if seg_end > seg_start {
+                        let (x1, y1) = self.char_byte_to_client_xy(seg_start, line_height);
+                        let (x2, _) = self.char_byte_to_client_xy(seg_end, line_height);
+                        if x2 > x1 {
+                            let rect = RECT {
+                                left: x1,
+                                top: y1,
+                                right: x2,
+                                bottom: y1 + line_height,
+                            };
+                            let _ = InvertRect(hdc, &rect);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Render Multiple Carets (`ctx.cursor_positions`)
+        if !self.multi_cursor.cursors.has_block_selection() {
+            let primary_brush = CreateSolidBrush(COLORREF(0x00B4_5A00)); // Deep royal blue (BGR)
+            let secondary_brush = CreateSolidBrush(COLORREF(0x00EB_8C1E)); // Bright azure blue (BGR)
+
+            for &byte_pos in &ctx.cursor_positions {
+                let (x, y) = self.char_byte_to_client_xy(byte_pos, line_height);
+                let caret_rect = RECT {
+                    left: x,
+                    top: y,
+                    right: x + 2,
+                    bottom: y + line_height,
+                };
+                let brush = if byte_pos == ctx.primary_cursor_position {
+                    primary_brush
+                } else {
+                    secondary_brush
+                };
+                let _ = FillRect(hdc, &caret_rect, brush);
+            }
+
+            let _ = DeleteObject(HGDIOBJ(primary_brush.0));
+            let _ = DeleteObject(HGDIOBJ(secondary_brush.0));
+        }
+
+        if !old_font.is_invalid() {
+            let _ = SelectObject(hdc, old_font);
+        }
+        let _ = ReleaseDC(Some(self.hwnd_edit), hdc);
+    }
+
+    /// Computes client-area `(x, y)` pixel coordinates for a UTF-8 byte offset in `hwnd_edit`.
+    unsafe fn char_byte_to_client_xy(&self, byte_pos: usize, line_height: i32) -> (i32, i32) {
+        let text = self.multi_cursor.text();
+        let u16_idx = byte_to_utf16_offset(text, byte_pos);
+        let pos_res = SendMessageW(
+            self.hwnd_edit,
+            EM_POSFROMCHAR,
+            Some(WPARAM(u16_idx)),
+            Some(LPARAM(0)),
+        )
+        .0;
+
+        if pos_res != -1 {
+            let x = (pos_res & 0xFFFF) as i16 as i32;
+            let y = ((pos_res >> 16) & 0xFFFF) as i16 as i32;
+            return (x, y);
+        }
+
+        // Fallback when `u16_idx` is at the very end of the buffer (where EM_POSFROMCHAR may return -1)
+        if text.is_empty() || byte_pos == 0 {
+            let zero_res = SendMessageW(
+                self.hwnd_edit,
+                EM_POSFROMCHAR,
+                Some(WPARAM(0)),
+                Some(LPARAM(0)),
+            )
+            .0;
+            if zero_res != -1 {
+                let x = (zero_res & 0xFFFF) as i16 as i32;
+                let y = ((zero_res >> 16) & 0xFFFF) as i16 as i32;
+                return (x, y);
+            }
+            return (2, 2);
+        }
+
+        // If the buffer ends with a newline, position at the start of the next line
+        if text[..byte_pos.min(text.len())].ends_with('\n') {
+            let prev_u16 = u16_idx.saturating_sub(1);
+            let prev_res = SendMessageW(
+                self.hwnd_edit,
+                EM_POSFROMCHAR,
+                Some(WPARAM(prev_u16)),
+                Some(LPARAM(0)),
+            )
+            .0;
+            let base_y = if prev_res != -1 {
+                ((prev_res >> 16) & 0xFFFF) as i16 as i32 + line_height
+            } else {
+                2
+            };
+            return (2, base_y);
+        }
+
+        // Otherwise measure from the previous character and advance by 1 character width
+        let prev_u16 = u16_idx.saturating_sub(1);
+        let prev_res = SendMessageW(
+            self.hwnd_edit,
+            EM_POSFROMCHAR,
+            Some(WPARAM(prev_u16)),
+            Some(LPARAM(0)),
+        )
+        .0;
+        if prev_res != -1 {
+            let x = (prev_res & 0xFFFF) as i16 as i32 + 8;
+            let y = ((prev_res >> 16) & 0xFFFF) as i16 as i32;
+            return (x, y);
+        }
+
+        (2, 2)
     }
 
     fn show_error(&self, message: &str) {
@@ -365,6 +815,257 @@ impl NotepadAppState {
             );
         }
     }
+}
+
+/// Attaches the multi-cursor/block-selection subclass procedure to `hwnd_edit`.
+pub unsafe fn attach_edit_subclass(hwnd_edit: HWND, state_ptr: *mut NotepadAppState) {
+    if hwnd_edit.is_invalid() || state_ptr.is_null() {
+        return;
+    }
+    SetWindowLongPtrW(hwnd_edit, GWLP_USERDATA, state_ptr as isize);
+    let prev = SetWindowLongPtrW(
+        hwnd_edit,
+        GWLP_WNDPROC,
+        edit_subclass_proc as *const () as usize as isize,
+    );
+    if let Some(state) = state_ptr.as_mut() {
+        state.edit_prev_wndproc = prev;
+    }
+}
+
+/// Detaches the subclass procedure from `hwnd_edit` before window destruction so no
+/// trailing messages (`WM_DESTROY` / `WM_NCDESTROY`) dereference `GWLP_USERDATA`.
+pub unsafe fn detach_edit_subclass(hwnd_edit: HWND, prev_wndproc: isize) {
+    if hwnd_edit.is_invalid() {
+        return;
+    }
+    SetWindowLongPtrW(hwnd_edit, GWLP_USERDATA, 0);
+    if prev_wndproc != 0 {
+        SetWindowLongPtrW(hwnd_edit, GWLP_WNDPROC, prev_wndproc);
+    }
+}
+
+/// Converts client `(x, y)` mouse coordinates in `hwnd_edit` to a UTF-8 byte offset.
+unsafe fn mouse_lparam_to_byte_offset(state: &NotepadAppState, lparam: LPARAM) -> usize {
+    let char_res = SendMessageW(
+        state.hwnd_edit,
+        EM_CHARFROMPOS,
+        Some(WPARAM(0)),
+        Some(lparam),
+    )
+    .0;
+    let u16_index = (char_res & 0xFFFF) as usize;
+    utf16_to_byte_offset(state.multi_cursor.text(), u16_index)
+}
+
+/// Subclass Window Procedure for the child `"Edit"` control.
+/// Intercepts multi-cursor and rectangular block-selection mouse/keyboard inputs
+/// and renders custom GDI carets and selection blocks on `WM_PAINT`.
+pub unsafe extern "system" fn edit_subclass_proc(
+    hwnd_edit: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let state_ptr = GetWindowLongPtrW(hwnd_edit, GWLP_USERDATA) as *mut NotepadAppState;
+    let Some(state) = state_ptr.as_mut() else {
+        return DefWindowProcW(hwnd_edit, msg, wparam, lparam);
+    };
+
+    let prev_proc: WNDPROC = if state.edit_prev_wndproc != 0 {
+        Some(std::mem::transmute::<
+            isize,
+            unsafe extern "system" fn(HWND, u32, WPARAM, LPARAM) -> LRESULT,
+        >(state.edit_prev_wndproc))
+    } else {
+        None
+    };
+
+    let ctrl_down = GetKeyState(VK_CONTROL.0 as i32) < 0;
+    let alt_down = GetKeyState(VK_MENU.0 as i32) < 0 || ((lparam.0 >> 29) & 1) != 0;
+    let shift_down = GetKeyState(VK_SHIFT.0 as i32) < 0;
+
+    match msg {
+        WM_LBUTTONDOWN => {
+            let _ = SetFocus(Some(hwnd_edit));
+            if alt_down {
+                state.sync_from_hwnd_edit();
+                let click_byte = mouse_lparam_to_byte_offset(state, lparam);
+                state.alt_drag_origin = Some(click_byte);
+                state.multi_cursor.handle_alt_click(click_byte);
+                state.sync_to_hwnd_edit(false);
+                return LRESULT(0);
+            } else {
+                state.alt_drag_origin = None;
+                if state.multi_cursor.cursors.is_multi()
+                    || state.multi_cursor.cursors.has_block_selection()
+                {
+                    state.multi_cursor.collapse_to_primary_cursor();
+                    let _ = InvalidateRect(Some(hwnd_edit), None, false);
+                }
+            }
+        }
+
+        WM_MOUSEMOVE => {
+            let lbutton_down = (wparam.0 & MK_LBUTTON_MASK) != 0;
+            if lbutton_down && alt_down {
+                if let Some(origin_byte) = state.alt_drag_origin {
+                    let current_byte = mouse_lparam_to_byte_offset(state, lparam);
+                    if current_byte != origin_byte
+                        || state.multi_cursor.cursors.has_block_selection()
+                    {
+                        state.multi_cursor.handle_alt_drag(origin_byte, current_byte);
+                        state.sync_to_hwnd_edit(false);
+                        return LRESULT(0);
+                    }
+                }
+            }
+        }
+
+        WM_LBUTTONUP => {
+            state.alt_drag_origin = None;
+            let res = CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam);
+            state.sync_from_hwnd_edit();
+            state.update_status_bar();
+            return res;
+        }
+
+        WM_KEYDOWN | WM_SYSKEYDOWN => {
+            let vk = wparam.0 as u16;
+
+            // 1. Ctrl+Alt+Up / Ctrl+Alt+Down -> Add cursor above / below
+            if ctrl_down && alt_down && !shift_down {
+                if vk == VK_UP.0 {
+                    state.cmd_add_cursor_above();
+                    return LRESULT(0);
+                }
+                if vk == VK_DOWN.0 {
+                    state.cmd_add_cursor_below();
+                    return LRESULT(0);
+                }
+            }
+
+            // 2. Ctrl+D -> Add cursor at next match of selection (or select word under cursor)
+            if ctrl_down && !alt_down && !shift_down && vk == b'D' as u16 {
+                state.cmd_add_cursor_next_match();
+                return LRESULT(0);
+            }
+
+            // 3. Alt+Shift+I -> Add cursors to line ends of selection
+            if alt_down && shift_down && !ctrl_down && vk == b'I' as u16 {
+                state.cmd_add_cursors_to_line_ends();
+                return LRESULT(0);
+            }
+
+            // 4. Shift+Alt+Arrows -> Rectangular block selection (Column Selection)
+            if shift_down && alt_down && !ctrl_down {
+                let block_dir = match vk {
+                    k if k == VK_LEFT.0 => Some(BlockDirection::Left),
+                    k if k == VK_RIGHT.0 => Some(BlockDirection::Right),
+                    k if k == VK_UP.0 => Some(BlockDirection::Up),
+                    k if k == VK_DOWN.0 => Some(BlockDirection::Down),
+                    _ => None,
+                };
+                if let Some(dir) = block_dir {
+                    state.cmd_block_select(dir);
+                    return LRESULT(0);
+                }
+            }
+
+            // 5. Escape -> Collapse secondary cursors and clear rectangular block selection
+            if vk == VK_ESCAPE.0
+                && (state.multi_cursor.cursors.is_multi()
+                    || state.multi_cursor.cursors.has_block_selection())
+            {
+                state.cmd_collapse_cursors();
+                return LRESULT(0);
+            }
+
+            // 6. Multi-Cursor & Block Selection Navigation / Deletion
+            if state.multi_cursor.cursors.is_multi()
+                || state.multi_cursor.cursors.has_block_selection()
+            {
+                if vk == VK_BACK.0 && !ctrl_down && !alt_down {
+                    state.cmd_multi_backspace();
+                    return LRESULT(0);
+                }
+                if vk == VK_DELETE.0 && !ctrl_down && !alt_down {
+                    state.cmd_multi_delete();
+                    return LRESULT(0);
+                }
+
+                if !alt_down && !ctrl_down {
+                    let move_dir = match vk {
+                        k if k == VK_LEFT.0 => Some(MoveDirection::Left),
+                        k if k == VK_RIGHT.0 => Some(MoveDirection::Right),
+                        k if k == VK_UP.0 => Some(MoveDirection::Up),
+                        k if k == VK_DOWN.0 => Some(MoveDirection::Down),
+                        k if k == VK_HOME.0 => Some(MoveDirection::Home),
+                        k if k == VK_END.0 => Some(MoveDirection::End),
+                        _ => None,
+                    };
+                    if let Some(dir) = move_dir {
+                        state.cmd_multi_move(dir, shift_down);
+                        return LRESULT(0);
+                    }
+                }
+            } else {
+                // Single-cursor navigation updates the status bar after standard processing
+                let is_nav = matches!(
+                    vk,
+                    k if k == VK_LEFT.0
+                        || k == VK_RIGHT.0
+                        || k == VK_UP.0
+                        || k == VK_DOWN.0
+                        || k == VK_HOME.0
+                        || k == VK_END.0
+                );
+                if is_nav {
+                    let res = CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam);
+                    state.sync_from_hwnd_edit();
+                    state.update_status_bar();
+                    return res;
+                }
+            }
+        }
+
+        WM_SYSCHAR => {
+            // Prevent system menu beep on Alt+Shift+I or Alt+Shift+Arrows
+            let ch_code = (wparam.0 & 0xFFFF) as u16;
+            if ch_code == b'I' as u16 || ch_code == b'i' as u16 || shift_down {
+                return LRESULT(0);
+            }
+        }
+
+        WM_CHAR => {
+            let ch_u32 = (wparam.0 & 0xFFFF) as u32;
+            // Suppress Ctrl+D control char (0x04 = EOT)
+            if ch_u32 == 0x04 {
+                return LRESULT(0);
+            }
+
+            if state.multi_cursor.cursors.is_multi()
+                || state.multi_cursor.cursors.has_block_selection()
+            {
+                if let Some(ch) = char::from_u32(ch_u32) {
+                    if ch >= ' ' || ch == '\t' || ch == '\r' {
+                        state.cmd_multi_insert_char(ch);
+                        return LRESULT(0);
+                    }
+                }
+            }
+        }
+
+        WM_PAINT => {
+            let res = CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam);
+            state.render_multi_cursor_and_block_overlays();
+            return res;
+        }
+
+        _ => {}
+    }
+
+    CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam)
 }
 
 /// Registers the `"Notepad"` window class (`NPRegister` at `0x14001E200` - `0x14001E2A0`).
@@ -495,7 +1196,7 @@ pub fn create_notepad_window(
         );
     }
 
-    // 5. Box application state and attach to GWLP_USERDATA
+    // 5. Box application state, attach to GWLP_USERDATA, and subclass Edit control
     let state = Box::new(NotepadAppState {
         hinstance,
         hwnd_main,
@@ -505,10 +1206,16 @@ pub fn create_notepad_window(
         status_bar_visible: true,
         current_file: None,
         encoding: TextEncoding::Utf8,
+        multi_cursor: MultiCursorEditor::new(),
+        edit_prev_wndproc: 0,
+        alt_drag_origin: None,
+        internal_clipboard: None,
+        syncing_to_hwnd: false,
     });
     let state_ptr = Box::into_raw(state);
     unsafe {
         SetWindowLongPtrW(hwnd_main, GWLP_USERDATA, state_ptr as isize);
+        attach_edit_subclass(hwnd_edit, state_ptr);
         if let Some(cmd) = show_cmd {
             let _ = ShowWindow(hwnd_main, cmd);
         }
@@ -563,7 +1270,8 @@ pub unsafe extern "system" fn notepad_wnd_proc(
 
                 // 0x14000EF8F - 0x14000EFB6: Notification from g_hwndEdit
                 if child_hwnd == state.hwnd_edit && !state.hwnd_edit.is_invalid() {
-                    if notify_code == EN_CHANGE {
+                    if notify_code == EN_CHANGE && !state.syncing_to_hwnd {
+                        state.sync_from_hwnd_edit();
                         state.update_window_title();
                         state.update_status_bar();
                     }
@@ -585,21 +1293,69 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                         let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
                     }
                     ID_EDIT_UNDO => {
-                        SendMessageW(state.hwnd_edit, EM_UNDO, None, None);
+                        if state.multi_cursor.can_undo() {
+                            if state.multi_cursor.undo() {
+                                state.sync_to_hwnd_edit(true);
+                            }
+                        } else {
+                            SendMessageW(state.hwnd_edit, EM_UNDO, None, None);
+                            state.sync_from_hwnd_edit();
+                        }
                     }
                     ID_EDIT_CUT => {
-                        SendMessageW(state.hwnd_edit, WM_CUT, None, None);
+                        if state.multi_cursor.cursors.is_multi()
+                            || state.multi_cursor.cursors.has_block_selection()
+                        {
+                            if let Some(cut_str) = state.multi_cursor.cut_selection() {
+                                state.internal_clipboard = Some(cut_str);
+                                state.sync_to_hwnd_edit(true);
+                            }
+                        } else {
+                            SendMessageW(state.hwnd_edit, WM_CUT, None, None);
+                            state.sync_from_hwnd_edit();
+                        }
                     }
                     ID_EDIT_COPY => {
-                        SendMessageW(state.hwnd_edit, WM_COPY, None, None);
+                        if state.multi_cursor.cursors.is_multi()
+                            || state.multi_cursor.cursors.has_block_selection()
+                        {
+                            if let Some(copied) = state.multi_cursor.copy_selection() {
+                                state.internal_clipboard = Some(copied);
+                            }
+                        } else {
+                            state.sync_from_hwnd_edit();
+                            state.internal_clipboard = state.multi_cursor.copy_selection();
+                            SendMessageW(state.hwnd_edit, WM_COPY, None, None);
+                        }
                     }
                     ID_EDIT_PASTE => {
-                        SendMessageW(state.hwnd_edit, WM_PASTE, None, None);
+                        if state.multi_cursor.cursors.is_multi()
+                            || state.multi_cursor.cursors.has_block_selection()
+                        {
+                            if let Some(clip) = state.internal_clipboard.clone() {
+                                state.multi_cursor.paste_text(&clip);
+                                state.sync_to_hwnd_edit(true);
+                            } else {
+                                SendMessageW(state.hwnd_edit, WM_PASTE, None, None);
+                                state.sync_from_hwnd_edit();
+                            }
+                        } else {
+                            SendMessageW(state.hwnd_edit, WM_PASTE, None, None);
+                            state.sync_from_hwnd_edit();
+                        }
                     }
                     ID_EDIT_CLEAR => {
-                        SendMessageW(state.hwnd_edit, WM_CLEAR, None, None);
+                        if state.multi_cursor.cursors.is_multi()
+                            || state.multi_cursor.cursors.has_block_selection()
+                        {
+                            state.cmd_multi_delete();
+                        } else {
+                            SendMessageW(state.hwnd_edit, WM_CLEAR, None, None);
+                            state.sync_from_hwnd_edit();
+                        }
                     }
                     ID_EDIT_SELECTALL => {
+                        state.multi_cursor.collapse_to_primary_cursor();
                         // 0x14000E3A0: SendMessageW(g_hwndEdit, EM_SETSEL, 0, -1) + EM_SCROLLCARET
                         SendMessageW(
                             state.hwnd_edit,
@@ -608,14 +1364,31 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                             Some(LPARAM(-1)),
                         );
                         SendMessageW(state.hwnd_edit, EM_SCROLLCARET, None, None);
+                        state.sync_from_hwnd_edit();
                     }
                     ID_EDIT_TIMEDATE => {
                         // 0x14000E394: InsertDateTime (0x140010580)
                         state.insert_date_time(false);
                     }
+                    ID_EDIT_ADD_CURSOR_ABOVE => {
+                        state.cmd_add_cursor_above();
+                    }
+                    ID_EDIT_ADD_CURSOR_BELOW => {
+                        state.cmd_add_cursor_below();
+                    }
+                    ID_EDIT_ADD_CURSOR_NEXT_MATCH => {
+                        state.cmd_add_cursor_next_match();
+                    }
+                    ID_EDIT_ADD_CURSORS_LINE_ENDS => {
+                        state.cmd_add_cursors_to_line_ends();
+                    }
+                    ID_EDIT_SINGLE_CURSOR => {
+                        state.cmd_collapse_cursors();
+                    }
                     ID_FORMAT_WORDWRAP => {
                         // 0x14000E1CE: Toggle Word Wrap & NPReCreate (0x14001FA28)
                         let status_h = state.active_status_height();
+                        detach_edit_subclass(state.hwnd_edit, state.edit_prev_wndproc);
                         if let Ok(new_edit) = state.word_wrap.toggle_and_recreate_edit(
                             state.hwnd_main,
                             state.hwnd_edit,
@@ -623,6 +1396,8 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                             status_h,
                         ) {
                             state.hwnd_edit = new_edit;
+                            attach_edit_subclass(new_edit, state_ptr);
+                            state.sync_from_hwnd_edit();
                         }
                     }
                     ID_VIEW_STATUS => {
@@ -664,6 +1439,9 @@ pub unsafe extern "system" fn notepad_wnd_proc(
             // 0x14000EAC0: WM_CLOSE (0x0010) -> CheckSave + DestroyWindow
             WM_CLOSE => {
                 if state.check_save() {
+                    if !state.hwnd_edit.is_invalid() {
+                        detach_edit_subclass(state.hwnd_edit, state.edit_prev_wndproc);
+                    }
                     if !state.hwnd_status.is_invalid() {
                         let _ = DestroyWindow(state.hwnd_status);
                         state.hwnd_status = HWND::default();
@@ -675,6 +1453,9 @@ pub unsafe extern "system" fn notepad_wnd_proc(
 
             // 0x14000EAAD: WM_DESTROY (0x0002) -> PostQuitMessage(0)
             WM_DESTROY => {
+                if !state.hwnd_edit.is_invalid() {
+                    detach_edit_subclass(state.hwnd_edit, state.edit_prev_wndproc);
+                }
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 let _ = Box::from_raw(state_ptr);
                 PostQuitMessage(0);

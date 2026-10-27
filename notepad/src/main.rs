@@ -1,10 +1,12 @@
 //! Entry point (`wWinMain` at `0x140010280`) and Message Loop (`0x1400103A3` - `0x140010489`)
 //! for the reverse-engineered Win32 Notepad clone.
 
+use notepad_win32::cursor::{BlockDirection, Position2D};
 use notepad_win32::file_io::{get_edit_text, load_file_win32, save_file_win32, set_edit_text, TextEncoding};
 use notepad_win32::menu::{
-    IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, ID_EDIT_SELECTALL, ID_EDIT_TIMEDATE, ID_EDIT_UNDO,
-    ID_VIEW_STATUS,
+    IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, ID_EDIT_ADD_CURSOR_BELOW,
+    ID_EDIT_ADD_CURSOR_NEXT_MATCH, ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE,
+    ID_EDIT_UNDO, ID_VIEW_STATUS,
 };
 use notepad_win32::window::{create_notepad_window, NotepadAppState};
 use notepad_win32::word_wrap::{WordWrap, ID_FORMAT_WORDWRAP};
@@ -125,7 +127,71 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
         assert!(!state.status_bar_visible);
         println!("[OK] 7. Verified ID_VIEW_STATUS (0x1B) status bar visibility toggle");
 
-        // 7. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
+        // 7. Test Multi-Cursor & Block Selection integration (Step 3 verification)
+        set_edit_text(state.hwnd_edit, "item_a = 10\r\nitem_b = 20\r\nitem_c = 30");
+        state.multi_cursor.set_text("item_a = 10\r\nitem_b = 20\r\nitem_c = 30");
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_EDIT_ADD_CURSOR_BELOW as usize)),
+            Some(LPARAM(0)),
+        );
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_EDIT_ADD_CURSOR_BELOW as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.multi_cursor.cursors.count(), 3);
+        state.cmd_multi_insert_char('>');
+        assert_eq!(
+            get_edit_text(state.hwnd_edit),
+            ">item_a = 10\r\n>item_b = 20\r\n>item_c = 30"
+        );
+
+        // Collapse to single cursor and test rectangular Block Selection
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_EDIT_SINGLE_CURSOR as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.multi_cursor.cursors.count(), 1);
+        let col_pos = state
+            .multi_cursor
+            .pos_2d_to_byte(Position2D { line: 0, column: 10 });
+        state.multi_cursor.cursors.primary_mut().move_to(col_pos, false);
+        state.multi_cursor.block_select(BlockDirection::Down);
+        state.multi_cursor.block_select(BlockDirection::Down);
+        state.multi_cursor.block_select(BlockDirection::Right);
+        state.multi_cursor.block_select(BlockDirection::Right);
+        assert!(state.multi_cursor.cursors.has_block_selection());
+        state.multi_cursor.insert_text("99");
+        state.sync_to_hwnd_edit(true);
+        assert_eq!(
+            get_edit_text(state.hwnd_edit),
+            ">item_a = 99\r\n>item_b = 99\r\n>item_c = 99"
+        );
+
+        // Test Ctrl+D (ID_EDIT_ADD_CURSOR_NEXT_MATCH)
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_EDIT_SINGLE_CURSOR as usize)),
+            Some(LPARAM(0)),
+        );
+        state.multi_cursor.cursors.primary_mut().move_to(1, false);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_EDIT_ADD_CURSOR_NEXT_MATCH as usize)),
+            Some(LPARAM(0)),
+        );
+        println!(
+            "[OK] 8. Verified Multi-Cursor (Ctrl+Alt+Down, Ctrl+D) & Block Selection (Shift+Alt+Arrows) state and HWND sync"
+        );
+
+        // 8. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
         set_edit_text(state.hwnd_edit, "");
         let _ = std::fs::remove_file(&temp_file);
         SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
@@ -133,7 +199,7 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
         // Drain the queued WM_QUIT message posted by PostQuitMessage(0)
         let mut msg = MSG::default();
         let _ = GetMessageW(&mut msg, None, 0, 0);
-        println!("[OK] 8. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
+        println!("[OK] 9. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
     }
 
     println!("=== All Win32 Lifecycle Checks Passed! ===");

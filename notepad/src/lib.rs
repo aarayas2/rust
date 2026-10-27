@@ -15,12 +15,18 @@
 //! - **Common File Dialogs (`save_dialog.rs`):** Safe builders around `GetOpenFileNameW`
 //!   (`0x14000D078`) and `GetSaveFileNameW` (`0x14000D2E8`).
 
+pub mod cursor;
 pub mod file_io;
 pub mod menu;
 pub mod save_dialog;
 pub mod window;
 pub mod word_wrap;
 
+pub use cursor::{
+    byte_to_utf16_offset, utf16_to_byte_offset, BlockDirection, Cursor, CursorId, Cursors,
+    MoveDirection, MultiCursorEditor, Position2D, SelectionActiveSet, SelectionContext,
+    SelectionMode,
+};
 pub use file_io::{
     decode_notepad_bytes, encode_notepad_bytes, get_edit_text, is_edit_modified, load_file_win32,
     save_file_win32, set_edit_modified, set_edit_text, LoadedDocument, TextEncoding,
