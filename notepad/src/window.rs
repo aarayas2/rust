@@ -35,22 +35,26 @@ use crate::menu::{
     IDM_HELP_ABOUT, ID_EDIT_ADD_CURSORS_LINE_ENDS, ID_EDIT_ADD_CURSOR_ABOVE,
     ID_EDIT_ADD_CURSOR_BELOW, ID_EDIT_ADD_CURSOR_NEXT_MATCH, ID_EDIT_CLEAR, ID_EDIT_COPY,
     ID_EDIT_CUT, ID_EDIT_PASTE, ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE,
-    ID_EDIT_UNDO, ID_VIEW_STATUS,
+    ID_EDIT_UNDO, ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_CLASSIC, ID_FORMAT_THEME_MARIANA,
+    ID_FORMAT_THEME_MONOKAI, ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS,
 };
 use crate::save_dialog::{OpenFileDialog, SaveFileDialog};
+use crate::theme::{GutterLayout, Theme, ThemePreset};
 use crate::word_wrap::{create_edit_control, WordWrap, WordWrapManager, ID_FORMAT_WORDWRAP};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateSolidBrush, DeleteObject, FillRect, GetDC, GetStockObject, GetTextMetricsW,
-    InvalidateRect, InvertRect, ReleaseDC, SelectObject, COLOR_WINDOW, DEFAULT_GUI_FONT, HBRUSH,
-    HGDIOBJ, TEXTMETRICW,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject,
+    GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, InvertRect, ReleaseDC, SelectObject,
+    SetBkColor, SetBkMode, SetTextColor, TextOutW, COLOR_WINDOW, DEFAULT_GUI_FONT, HBRUSH, HDC,
+    HGDIOBJ, PAINTSTRUCT, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_LEFT, VK_MENU, VK_RIGHT, VK_SHIFT, VK_UP,
+    VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
@@ -58,10 +62,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     PostQuitMessage, RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
     CW_USEDEFAULT, GWLP_USERDATA, GWLP_WNDPROC, HMENU, IDC_IBEAM, IDI_APPLICATION, IDNO, IDYES,
     MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNOCANCEL, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CHAR, WM_CLEAR, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CUT, WM_DESTROY,
-    WM_GETFONT, WM_INITMENU, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT,
-    WM_PASTE, WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WNDCLASSEXW, WNDPROC,
-    WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WINDOW_STYLE, WM_CHAR, WM_CLEAR, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CTLCOLOREDIT,
+    WM_CTLCOLORSTATIC, WM_CUT, WM_DESTROY, WM_ERASEBKGND, WM_GETFONT, WM_INITMENU, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_SETFOCUS,
+    WM_SETFONT, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_VSCROLL, WNDCLASSEXW, WNDPROC, WS_CHILD,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 /// Window Class Name (`0x14002B828`: `"Notepad"`).
@@ -78,6 +83,9 @@ pub const EN_CHANGE: u16 = 0x0300;
 
 /// Edit control message to set maximum text length (`EM_LIMITTEXT = 0x00C5`).
 pub const EM_LIMITTEXT: u32 = 0x00C5;
+
+/// Edit control message to query the zero-based index of the uppermost visible line (`EM_GETFIRSTVISIBLELINE = 0x00CE`).
+pub const EM_GETFIRSTVISIBLELINE: u32 = 0x00CE;
 
 /// Edit control message to query client `(x, y)` coordinates of a character index (`EM_POSFROMCHAR = 0x00D6`).
 pub const EM_POSFROMCHAR: u32 = 0x00D6;
@@ -108,6 +116,18 @@ pub struct NotepadAppState {
     pub internal_clipboard: Option<String>,
     /// Guard flag to avoid recursive `EN_CHANGE` resynchronization while applying multi-cursor edits.
     pub syncing_to_hwnd: bool,
+    /// Active Sublime Text-inspired color scheme preset.
+    pub theme_preset: ThemePreset,
+    /// Active color palette (`background`, `foreground`, `caret`, `gutter`, `gutter_foreground`, etc.).
+    pub theme: Theme,
+    /// Cached GDI solid brush for `WM_CTLCOLOREDIT` (`theme.background`).
+    pub edit_bg_brush: HBRUSH,
+    /// Cached GDI solid brush for `WM_CTLCOLORSTATIC` (`theme.status_background`).
+    pub status_bg_brush: HBRUSH,
+    /// Whether the left line-number gutter is visible (`[rsi + 0x564]` / `[rsi + 0x566]` in `sublime_text.exe`).
+    pub line_numbers_visible: bool,
+    /// Computed left gutter layout (`digit_count`, `char_zero_width`, `total_width`).
+    pub gutter_layout: GutterLayout,
 }
 
 impl NotepadAppState {
@@ -116,7 +136,123 @@ impl NotepadAppState {
         EditorState {
             word_wrap: self.word_wrap.state(),
             status_bar_visible: self.status_bar_visible,
+            line_numbers_visible: self.line_numbers_visible,
+            theme_preset: self.theme_preset,
         }
+    }
+
+    /// Switches the active color scheme preset, recreates GDI background brushes for
+    /// `WM_CTLCOLOREDIT` / `WM_CTLCOLORSTATIC`, and repaints the editor, gutter, and status bar.
+    pub fn set_theme_preset(&mut self, preset: ThemePreset) {
+        self.theme_preset = preset;
+        self.theme = Theme::from_preset(preset);
+
+        unsafe {
+            if !self.edit_bg_brush.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(self.edit_bg_brush.0));
+            }
+            if !self.status_bg_brush.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(self.status_bg_brush.0));
+            }
+            self.edit_bg_brush = CreateSolidBrush(self.theme.background.to_colorref());
+            self.status_bg_brush = CreateSolidBrush(self.theme.status_background.to_colorref());
+
+            if !self.hwnd_main.is_invalid() {
+                let _ = InvalidateRect(Some(self.hwnd_main), None, true);
+            }
+            if !self.hwnd_edit.is_invalid() {
+                let _ = InvalidateRect(Some(self.hwnd_edit), None, true);
+            }
+            if !self.hwnd_status.is_invalid() {
+                let _ = InvalidateRect(Some(self.hwnd_status), None, true);
+            }
+        }
+        self.update_status_bar();
+        unsafe {
+            self.render_gutter_direct();
+        }
+    }
+
+    /// Toggles the visibility of the left line-number gutter and relayouts the viewport.
+    pub fn toggle_line_numbers(&mut self) {
+        self.line_numbers_visible = !self.line_numbers_visible;
+        self.relayout_viewport();
+        self.update_status_bar();
+    }
+
+    /// Measures the pixel advance width of ASCII `'0'` (`0x30`, matching `0x14036B586` in `sublime_text.exe`)
+    /// and the line height of `self.hwnd_edit`'s active font via GDI `GetTextExtentPoint32W` and `GetTextMetricsW`.
+    pub fn measure_edit_font_metrics(&self) -> (i32, i32) {
+        if self.hwnd_edit.is_invalid() {
+            return (8, 16);
+        }
+        unsafe {
+            let hdc = GetDC(Some(self.hwnd_edit));
+            if hdc.is_invalid() {
+                return (8, 16);
+            }
+
+            let hfont = SendMessageW(self.hwnd_edit, WM_GETFONT, None, None);
+            let old_font = if hfont.0 != 0 {
+                SelectObject(hdc, HGDIOBJ(hfont.0 as *mut core::ffi::c_void))
+            } else {
+                let stock = GetStockObject(DEFAULT_GUI_FONT);
+                if !stock.is_invalid() {
+                    SelectObject(hdc, stock)
+                } else {
+                    HGDIOBJ::default()
+                }
+            };
+
+            let mut tm = TEXTMETRICW::default();
+            let _ = GetTextMetricsW(hdc, &mut tm);
+            let line_height = tm.tmHeight.max(14);
+
+            // Measure ASCII '0' (0x30) advance width via GetTextExtentPoint32W (Sublime 0x14036B586)
+            let zero_glyph: [u16; 1] = [0x0030];
+            let mut size = SIZE::default();
+            let ok = GetTextExtentPoint32W(hdc, &zero_glyph, &mut size).as_bool();
+            let char_zero_w = if ok && size.cx > 0 {
+                size.cx
+            } else {
+                tm.tmAveCharWidth.max(7)
+            };
+
+            if !old_font.is_invalid() {
+                let _ = SelectObject(hdc, old_font);
+            }
+            let _ = ReleaseDC(Some(self.hwnd_edit), hdc);
+            (char_zero_w, line_height)
+        }
+    }
+
+    /// Recomputes `self.gutter_layout` based on the current line count in `self.multi_cursor`.
+    /// Returns `true` if the total pixel width of the gutter changed (e.g., crossing 99 -> 100 lines).
+    pub fn refresh_gutter_layout(&mut self) -> bool {
+        let total_lines = self.multi_cursor.line_count();
+        let (char_zero_w, _) = self.measure_edit_font_metrics();
+        let new_layout = GutterLayout::compute(
+            total_lines,
+            char_zero_w,
+            GutterLayout::DEFAULT_MARGIN_PX,
+            self.line_numbers_visible,
+        );
+        let width_changed = new_layout.total_width != self.gutter_layout.total_width
+            || new_layout.digit_count != self.gutter_layout.digit_count;
+        self.gutter_layout = new_layout;
+        width_changed
+    }
+
+    /// Queries the main window client area and repositions the left gutter, `"Edit"` control, and status bar.
+    pub fn relayout_viewport(&mut self) {
+        if self.hwnd_main.is_invalid() {
+            return;
+        }
+        let mut rc = RECT::default();
+        unsafe {
+            let _ = GetClientRect(self.hwnd_main, &mut rc);
+        }
+        self.resize_children(rc.right - rc.left, rc.bottom - rc.top);
     }
 
     /// Returns the active status bar height (`0` when hidden, `STATUS_BAR_HEIGHT` when visible).
@@ -149,6 +285,13 @@ impl NotepadAppState {
             sel_start as usize,
             sel_end as usize,
         );
+        if self.refresh_gutter_layout() {
+            self.relayout_viewport();
+        } else {
+            unsafe {
+                self.render_gutter_direct();
+            }
+        }
     }
 
     /// Pushes the current `self.multi_cursor` text buffer and primary caret/selection to `hwnd_edit`.
@@ -195,6 +338,13 @@ impl NotepadAppState {
         }
 
         self.syncing_to_hwnd = false;
+        if self.refresh_gutter_layout() {
+            self.relayout_viewport();
+        } else {
+            unsafe {
+                self.render_gutter_direct();
+            }
+        }
         self.update_window_title();
         self.update_status_bar();
     }
@@ -292,8 +442,8 @@ impl NotepadAppState {
         };
 
         let status_str = format!(
-            "  Ln {}, Col {}{}   |   100%   |   Windows (CRLF)   |   {}\0",
-            line, col, mode_badge, enc_label
+            "  Ln {}, Col {}{}   |   {}   |   Windows (CRLF)   |   {}\0",
+            line, col, mode_badge, self.theme.name, enc_label
         );
         let wide: Vec<u16> = status_str.encode_utf16().collect();
         unsafe {
@@ -301,21 +451,35 @@ impl NotepadAppState {
         }
     }
 
-    /// Resizes the child `"Edit"` control and status bar to fit the main window client area
-    /// (`NPSize` at `0x14000E848` - `0x14000E93D`).
-    pub fn resize_children(&self, width: i32, height: i32) {
+    /// Resizes the left line-number gutter, child `"Edit"` control, and status bar to fit the
+    /// main window client area (`NPSize` at `0x14000E848` combined with Sublime Text's
+    /// viewport split at `0x1403A1AC6` and `0x140369FA9`).
+    pub fn resize_children(&mut self, width: i32, height: i32) {
         let status_h = self.active_status_height();
         let edit_h = (height - status_h).max(0);
 
+        let _ = self.refresh_gutter_layout();
+        let (gutter_w, edit_x, edit_w) = self.gutter_layout.split_viewport(width);
+
         unsafe {
             if !self.hwnd_edit.is_invalid() {
-                // 0x14000E8ED: MoveWindow(g_hwndEdit, 0, 0, cx, cy - statusHeight, TRUE)
-                let _ = MoveWindow(self.hwnd_edit, 0, 0, width, edit_h, true);
+                // Sublime 0x1403A1AC6 & 0x140369FA9: offset text viewport by gutter_w and subtract gutter_w from width
+                let _ = MoveWindow(self.hwnd_edit, edit_x, 0, edit_w, edit_h, true);
             }
             if !self.hwnd_status.is_invalid() && self.status_bar_visible {
                 // 0x14000E915: MoveWindow(g_hwndStatus, 0, cy - statusHeight, cx, statusHeight, TRUE)
                 let _ = MoveWindow(self.hwnd_status, 0, edit_h, width, status_h, true);
             }
+            if !self.hwnd_main.is_invalid() && gutter_w > 0 {
+                let gutter_rc = RECT {
+                    left: 0,
+                    top: 0,
+                    right: gutter_w,
+                    bottom: edit_h,
+                };
+                let _ = InvalidateRect(Some(self.hwnd_main), Some(&gutter_rc), false);
+            }
+            self.render_gutter_direct();
         }
     }
 
@@ -361,6 +525,13 @@ impl NotepadAppState {
         self.multi_cursor.set_text("");
         self.current_file = None;
         self.encoding = TextEncoding::Utf8;
+        if self.refresh_gutter_layout() {
+            self.relayout_viewport();
+        } else {
+            unsafe {
+                self.render_gutter_direct();
+            }
+        }
         self.update_window_title();
         self.update_status_bar();
     }
@@ -405,6 +576,13 @@ impl NotepadAppState {
                 }
 
                 self.multi_cursor.set_text(get_edit_text(self.hwnd_edit));
+                if self.refresh_gutter_layout() {
+                    self.relayout_viewport();
+                } else {
+                    unsafe {
+                        self.render_gutter_direct();
+                    }
+                }
                 self.update_window_title();
                 self.update_status_bar();
                 Ok(())
@@ -647,7 +825,7 @@ impl NotepadAppState {
                         let _ = InvertRect(hdc, &rect);
                     }
 
-                    // Draw a per-line block edge caret bar at the active column
+                    // Draw a per-line block edge caret bar at the active column using theme.caret
                     let active_col = self
                         .multi_cursor
                         .cursors
@@ -655,7 +833,7 @@ impl NotepadAppState {
                         .sticky_column
                         .unwrap_or(end_col);
                     let caret_x = if active_col <= start_col { x1 } else { x2 };
-                    let caret_brush = CreateSolidBrush(COLORREF(0x00D7_7800)); // Accent blue (BGR)
+                    let caret_brush = CreateSolidBrush(self.theme.caret.to_colorref());
                     let caret_rect = RECT {
                         left: caret_x,
                         top: line_y,
@@ -701,10 +879,10 @@ impl NotepadAppState {
             }
         }
 
-        // 3. Render Multiple Carets (`ctx.cursor_positions`)
+        // 3. Render Multiple Carets (`ctx.cursor_positions`) using theme.caret & theme.secondary_caret
         if !self.multi_cursor.cursors.has_block_selection() {
-            let primary_brush = CreateSolidBrush(COLORREF(0x00B4_5A00)); // Deep royal blue (BGR)
-            let secondary_brush = CreateSolidBrush(COLORREF(0x00EB_8C1E)); // Bright azure blue (BGR)
+            let primary_brush = CreateSolidBrush(self.theme.caret.to_colorref());
+            let secondary_brush = CreateSolidBrush(self.theme.secondary_caret.to_colorref());
 
             for &byte_pos in &ctx.cursor_positions {
                 let (x, y) = self.char_byte_to_client_xy(byte_pos, line_height);
@@ -730,6 +908,154 @@ impl NotepadAppState {
             let _ = SelectObject(hdc, old_font);
         }
         let _ = ReleaseDC(Some(self.hwnd_edit), hdc);
+    }
+
+    /// Renders the left line-number gutter into `hdc` on `self.hwnd_main`, completely separated
+    /// from the main text-buffer rendering in `self.hwnd_edit` (modeled after Sublime Text's
+    /// gutter pass and `ColorScheme` offsets `[r12 + 0x46C..0x48C]`).
+    pub unsafe fn paint_gutter_hdc(&self, hdc: HDC) {
+        if self.hwnd_main.is_invalid()
+            || !self.line_numbers_visible
+            || self.gutter_layout.total_width <= 0
+            || hdc.is_invalid()
+        {
+            return;
+        }
+
+        let mut rc = RECT::default();
+        let _ = GetClientRect(self.hwnd_main, &mut rc);
+        let client_h = (rc.bottom - rc.top).max(0);
+        let edit_h = (client_h - self.active_status_height()).max(0);
+        let gutter_w = self.gutter_layout.total_width;
+        if edit_h <= 0 || gutter_w <= 0 {
+            return;
+        }
+
+        // 1. Fill gutter background strip `[0, 0, gutter_w, edit_h]` with `theme.gutter` (`[r12 + 0x46C]`)
+        let gutter_bg_brush = CreateSolidBrush(self.theme.gutter.to_colorref());
+        let gutter_rect = RECT {
+            left: 0,
+            top: 0,
+            right: gutter_w,
+            bottom: edit_h,
+        };
+        let _ = FillRect(hdc, &gutter_rect, gutter_bg_brush);
+        let _ = DeleteObject(HGDIOBJ(gutter_bg_brush.0));
+
+        // 2. Draw 1px vertical separator border at `x = gutter_w - 1` using `theme.selection_border` (`[r12 + 0x400]`)
+        let border_brush = CreateSolidBrush(self.theme.selection_border.to_colorref());
+        let border_rect = RECT {
+            left: (gutter_w - 1).max(0),
+            top: 0,
+            right: gutter_w,
+            bottom: edit_h,
+        };
+        let _ = FillRect(hdc, &border_rect, border_brush);
+        let _ = DeleteObject(HGDIOBJ(border_brush.0));
+
+        // 3. Collect all 0-based line indices that contain an active cursor (`highlight_line_number` `[rsi + 0x56C]`)
+        let mut active_lines = HashSet::new();
+        for (_, cursor) in self.multi_cursor.cursors.iter() {
+            let pos_2d = self.multi_cursor.byte_to_2d(cursor.position);
+            active_lines.insert(pos_2d.line);
+        }
+
+        // 4. Select editor font and configure transparent background mode
+        let hfont = if !self.hwnd_edit.is_invalid() {
+            SendMessageW(self.hwnd_edit, WM_GETFONT, None, None)
+        } else {
+            LRESULT(0)
+        };
+        let old_font = if hfont.0 != 0 {
+            SelectObject(hdc, HGDIOBJ(hfont.0 as *mut core::ffi::c_void))
+        } else {
+            let stock = GetStockObject(DEFAULT_GUI_FONT);
+            if !stock.is_invalid() {
+                SelectObject(hdc, stock)
+            } else {
+                HGDIOBJ::default()
+            }
+        };
+
+        let mut tm = TEXTMETRICW::default();
+        let _ = GetTextMetricsW(hdc, &mut tm);
+        let line_height = tm.tmHeight.max(14);
+        let _ = SetBkMode(hdc, TRANSPARENT);
+
+        // 5. Query the first visible line in `hwnd_edit` (`EM_GETFIRSTVISIBLELINE = 0x00CE`)
+        let first_visible = if !self.hwnd_edit.is_invalid() {
+            SendMessageW(self.hwnd_edit, EM_GETFIRSTVISIBLELINE, None, None)
+                .0
+                .max(0) as usize
+        } else {
+            0
+        };
+
+        let line_ranges = self.multi_cursor.line_content_ranges();
+        let total_lines = line_ranges.len().max(1);
+        let highlight_brush = CreateSolidBrush(self.theme.line_highlight.to_colorref());
+
+        // 6. Iterate through visible lines and draw right-aligned 1-based line numbers
+        for line_idx in first_visible..total_lines {
+            let y = if let Some(range) = line_ranges.get(line_idx) {
+                let (_, char_y) = self.char_byte_to_client_xy(range.start, line_height);
+                char_y
+            } else {
+                ((line_idx.saturating_sub(first_visible)) as i32) * line_height
+            };
+
+            if y >= edit_h {
+                break;
+            }
+            if y + line_height <= 0 {
+                continue;
+            }
+
+            let is_active = active_lines.contains(&line_idx);
+            if is_active {
+                // Highlight active line's gutter cell (`highlight_gutter` `[rsi + 0x56B]`)
+                let row_rect = RECT {
+                    left: 0,
+                    top: y.max(0),
+                    right: (gutter_w - 1).max(0),
+                    bottom: (y + line_height).min(edit_h),
+                };
+                let _ = FillRect(hdc, &row_rect, highlight_brush);
+                let _ = SetTextColor(hdc, self.theme.gutter_foreground_highlight.to_colorref());
+            } else {
+                let _ = SetTextColor(hdc, self.theme.gutter_foreground.to_colorref());
+            }
+
+            let formatted_num = format!(
+                "{:>width$}",
+                line_idx + 1,
+                width = self.gutter_layout.digit_count
+            );
+            let wide_num: Vec<u16> = formatted_num.encode_utf16().collect();
+            let _ = TextOutW(
+                hdc,
+                self.gutter_layout.horizontal_margin,
+                y,
+                &wide_num,
+            );
+        }
+
+        let _ = DeleteObject(HGDIOBJ(highlight_brush.0));
+        if !old_font.is_invalid() {
+            let _ = SelectObject(hdc, old_font);
+        }
+    }
+
+    /// Immediately repaints the left line-number gutter on `self.hwnd_main`.
+    pub unsafe fn render_gutter_direct(&self) {
+        if self.hwnd_main.is_invalid() || !self.line_numbers_visible {
+            return;
+        }
+        let hdc = GetDC(Some(self.hwnd_main));
+        if !hdc.is_invalid() {
+            self.paint_gutter_hdc(hdc);
+            let _ = ReleaseDC(Some(self.hwnd_main), hdc);
+        }
     }
 
     /// Computes client-area `(x, y)` pixel coordinates for a UTF-8 byte offset in `hwnd_edit`.
@@ -1010,7 +1336,7 @@ pub unsafe extern "system" fn edit_subclass_proc(
                     }
                 }
             } else {
-                // Single-cursor navigation updates the status bar after standard processing
+                // Single-cursor navigation updates the status bar and active gutter line after standard processing
                 let is_nav = matches!(
                     vk,
                     k if k == VK_LEFT.0
@@ -1019,6 +1345,8 @@ pub unsafe extern "system" fn edit_subclass_proc(
                         || k == VK_DOWN.0
                         || k == VK_HOME.0
                         || k == VK_END.0
+                        || k == VK_PRIOR.0
+                        || k == VK_NEXT.0
                 );
                 if is_nav {
                     let res = CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam);
@@ -1027,6 +1355,12 @@ pub unsafe extern "system" fn edit_subclass_proc(
                     return res;
                 }
             }
+        }
+
+        WM_VSCROLL | WM_MOUSEWHEEL => {
+            let res = CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam);
+            state.render_gutter_direct();
+            return res;
         }
 
         WM_SYSCHAR => {
@@ -1059,6 +1393,7 @@ pub unsafe extern "system" fn edit_subclass_proc(
         WM_PAINT => {
             let res = CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam);
             state.render_multi_cursor_and_block_overlays();
+            state.render_gutter_direct();
             return res;
         }
 
@@ -1196,7 +1531,17 @@ pub fn create_notepad_window(
         );
     }
 
-    // 5. Box application state, attach to GWLP_USERDATA, and subclass Edit control
+    // 5. Box application state with Sublime Mariana Dark theme & left line-number gutter enabled
+    let initial_preset = ThemePreset::MarianaDark;
+    let initial_theme = Theme::from_preset(initial_preset);
+    let (edit_bg_brush, status_bg_brush) = unsafe {
+        (
+            CreateSolidBrush(initial_theme.background.to_colorref()),
+            CreateSolidBrush(initial_theme.status_background.to_colorref()),
+        )
+    };
+    let initial_gutter = GutterLayout::compute(1, 8, GutterLayout::DEFAULT_MARGIN_PX, true);
+
     let state = Box::new(NotepadAppState {
         hinstance,
         hwnd_main,
@@ -1211,11 +1556,21 @@ pub fn create_notepad_window(
         alt_drag_origin: None,
         internal_clipboard: None,
         syncing_to_hwnd: false,
+        theme_preset: initial_preset,
+        theme: initial_theme,
+        edit_bg_brush,
+        status_bg_brush,
+        line_numbers_visible: true,
+        gutter_layout: initial_gutter,
     });
     let state_ptr = Box::into_raw(state);
     unsafe {
         SetWindowLongPtrW(hwnd_main, GWLP_USERDATA, state_ptr as isize);
         attach_edit_subclass(hwnd_edit, state_ptr);
+        if let Some(state_ref) = state_ptr.as_mut() {
+            state_ref.relayout_viewport();
+            state_ref.update_status_bar();
+        }
         if let Some(cmd) = show_cmd {
             let _ = ShowWindow(hwnd_main, cmd);
         }
@@ -1253,6 +1608,41 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                     let _ = SetFocus(Some(state.hwnd_edit));
                 }
                 return LRESULT(0);
+            }
+
+            // Sublime-inspired left line-number gutter rendering pass (WM_PAINT on main window)
+            WM_PAINT => {
+                let mut ps = PAINTSTRUCT::default();
+                let hdc = BeginPaint(hwnd, &mut ps);
+                if !hdc.is_invalid() {
+                    state.paint_gutter_hdc(hdc);
+                }
+                let _ = EndPaint(hwnd, &ps);
+                return LRESULT(0);
+            }
+
+            WM_ERASEBKGND => {
+                return LRESULT(1);
+            }
+
+            // Theme coloring for the child "Edit" control (`[r12 + 0x308]` fg & `[r12 + 0x318]` bg)
+            WM_CTLCOLOREDIT => {
+                let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+                if !hdc.is_invalid() {
+                    let _ = SetTextColor(hdc, state.theme.foreground.to_colorref());
+                    let _ = SetBkColor(hdc, state.theme.background.to_colorref());
+                }
+                return LRESULT(state.edit_bg_brush.0 as isize);
+            }
+
+            // Theme coloring for the child Status Bar ("STATIC" control)
+            WM_CTLCOLORSTATIC => {
+                let hdc = HDC(wparam.0 as *mut core::ffi::c_void);
+                if !hdc.is_invalid() {
+                    let _ = SetTextColor(hdc, state.theme.status_foreground.to_colorref());
+                    let _ = SetBkColor(hdc, state.theme.status_background.to_colorref());
+                }
+                return LRESULT(state.status_bg_brush.0 as isize);
             }
 
             // 0x14000ED6D: WM_INITMENU (0x0116) -> InitMenu (0x14000F2A0)
@@ -1397,8 +1787,24 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                         ) {
                             state.hwnd_edit = new_edit;
                             attach_edit_subclass(new_edit, state_ptr);
+                            state.relayout_viewport();
                             state.sync_from_hwnd_edit();
                         }
+                    }
+                    ID_FORMAT_THEME_MARIANA => {
+                        state.set_theme_preset(ThemePreset::MarianaDark);
+                    }
+                    ID_FORMAT_THEME_MONOKAI => {
+                        state.set_theme_preset(ThemePreset::MonokaiDark);
+                    }
+                    ID_FORMAT_THEME_BREAKERS => {
+                        state.set_theme_preset(ThemePreset::BreakersLight);
+                    }
+                    ID_FORMAT_THEME_CLASSIC => {
+                        state.set_theme_preset(ThemePreset::ClassicNotepad);
+                    }
+                    ID_VIEW_LINE_NUMBERS => {
+                        state.toggle_line_numbers();
                     }
                     ID_VIEW_STATUS => {
                         // 0x14000E30A: Toggle g_fStatusBar + ShowWindow + NPSize
@@ -1455,6 +1861,12 @@ pub unsafe extern "system" fn notepad_wnd_proc(
             WM_DESTROY => {
                 if !state.hwnd_edit.is_invalid() {
                     detach_edit_subclass(state.hwnd_edit, state.edit_prev_wndproc);
+                }
+                if !state.edit_bg_brush.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(state.edit_bg_brush.0));
+                }
+                if !state.status_bg_brush.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(state.status_bg_brush.0));
                 }
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 let _ = Box::from_raw(state_ptr);

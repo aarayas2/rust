@@ -29,6 +29,7 @@
 //! - **Help Menu (Submenu 4):**
 //!   - `IDM_HELP_ABOUT`     = `0x41` (65) -> `0x14000E59C` (`ShellAboutW`)
 
+use crate::theme::ThemePreset;
 use crate::word_wrap::{WordWrap, FORMAT_MENU_INDEX, ID_FORMAT_WORDWRAP};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
@@ -88,13 +89,22 @@ pub const ID_EDIT_SINGLE_CURSOR: u32 = 0x54;
 
 // Notepad View & Help Command IDs
 pub const ID_VIEW_STATUS: u32 = 0x1B;
+pub const ID_VIEW_LINE_NUMBERS: u32 = 0x60;
 pub const IDM_HELP_ABOUT: u32 = 0x41;
+
+// Sublime-inspired Color Scheme Theme Command IDs (Format Menu)
+pub const ID_FORMAT_THEME_MARIANA: u32 = 0x61;
+pub const ID_FORMAT_THEME_MONOKAI: u32 = 0x62;
+pub const ID_FORMAT_THEME_BREAKERS: u32 = 0x63;
+pub const ID_FORMAT_THEME_CLASSIC: u32 = 0x64;
 
 /// Represents the synchronized editor state inspected during `WM_INITMENU`.
 #[derive(Debug, Clone, Copy)]
 pub struct EditorState {
     pub word_wrap: WordWrap,
     pub status_bar_visible: bool,
+    pub line_numbers_visible: bool,
+    pub theme_preset: ThemePreset,
 }
 
 fn append_menu_str(hmenu: HMENU, flags: MENU_ITEM_FLAGS, id: usize, text: &str) {
@@ -208,11 +218,42 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
             ID_FORMAT_WORDWRAP as usize,
             "&Word Wrap",
         );
+        let _ = AppendMenuW(format_menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_menu_str(
+            format_menu,
+            MF_STRING,
+            ID_FORMAT_THEME_MARIANA as usize,
+            "Theme: &Mariana (Sublime Dark)",
+        );
+        append_menu_str(
+            format_menu,
+            MF_STRING,
+            ID_FORMAT_THEME_MONOKAI as usize,
+            "Theme: M&onokai (Sublime Dark)",
+        );
+        append_menu_str(
+            format_menu,
+            MF_STRING,
+            ID_FORMAT_THEME_BREAKERS as usize,
+            "Theme: &Breakers (Sublime Light)",
+        );
+        append_menu_str(
+            format_menu,
+            MF_STRING,
+            ID_FORMAT_THEME_CLASSIC as usize,
+            "Theme: &Classic Notepad (Light)",
+        );
         append_menu_str(menu_bar, MF_POPUP, format_menu.0 as usize, "F&ormat");
 
         // Submenu 3: View
         let view_menu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (View) failed")?;
         append_menu_str(view_menu, MF_STRING, ID_VIEW_STATUS as usize, "&Status Bar");
+        append_menu_str(
+            view_menu,
+            MF_STRING,
+            ID_VIEW_LINE_NUMBERS as usize,
+            "&Line Numbers (Gutter)",
+        );
         append_menu_str(menu_bar, MF_POPUP, view_menu.0 as usize, "&View");
 
         // Submenu 4: Help
@@ -309,13 +350,27 @@ pub fn init_menu(
             let _ = EnableMenuItem(edit_menu, ID_EDIT_UNDO, undo_flag);
         }
 
-        // 6. Format Menu: CheckMenuItem for Word Wrap (0x14000F55A)
+        // 6. Format Menu: CheckMenuItem for Word Wrap (0x14000F55A) & Active Theme Preset
         if !format_menu.is_invalid() {
             let wrap_check: MENU_ITEM_FLAGS = state.word_wrap.menu_check_flag() | MF_BYCOMMAND;
             CheckMenuItem(format_menu, ID_FORMAT_WORDWRAP, wrap_check.0);
+
+            for (cmd_id, preset) in [
+                (ID_FORMAT_THEME_MARIANA, ThemePreset::MarianaDark),
+                (ID_FORMAT_THEME_MONOKAI, ThemePreset::MonokaiDark),
+                (ID_FORMAT_THEME_BREAKERS, ThemePreset::BreakersLight),
+                (ID_FORMAT_THEME_CLASSIC, ThemePreset::ClassicNotepad),
+            ] {
+                let flag = if state.theme_preset == preset {
+                    MF_CHECKED
+                } else {
+                    MF_UNCHECKED
+                } | MF_BYCOMMAND;
+                CheckMenuItem(format_menu, cmd_id, flag.0);
+            }
         }
 
-        // 7. View Menu: CheckMenuItem for Status Bar (0x14000F591)
+        // 7. View Menu: CheckMenuItem for Status Bar (0x14000F591) & Line Numbers Gutter
         if !view_menu.is_invalid() {
             let status_check = if state.status_bar_visible {
                 MF_CHECKED
@@ -323,6 +378,13 @@ pub fn init_menu(
                 MF_UNCHECKED
             } | MF_BYCOMMAND;
             CheckMenuItem(view_menu, ID_VIEW_STATUS, status_check.0);
+
+            let gutter_check = if state.line_numbers_visible {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            } | MF_BYCOMMAND;
+            CheckMenuItem(view_menu, ID_VIEW_LINE_NUMBERS, gutter_check.0);
         }
     }
 

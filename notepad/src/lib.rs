@@ -19,6 +19,7 @@ pub mod cursor;
 pub mod file_io;
 pub mod menu;
 pub mod save_dialog;
+pub mod theme;
 pub mod window;
 pub mod word_wrap;
 
@@ -33,5 +34,6 @@ pub use file_io::{
 };
 pub use menu::{create_notepad_menu, init_menu, EditorState};
 pub use save_dialog::{OpenFileDialog, SaveDialogError, SaveFileDialog};
+pub use theme::{GutterLayout, RgbColor, Theme, ThemePreset};
 pub use window::{create_notepad_window, notepad_wnd_proc, register_notepad_class, NotepadAppState};
 pub use word_wrap::{WordWrap, WordWrapManager};

@@ -6,8 +6,10 @@ use notepad_win32::file_io::{get_edit_text, load_file_win32, save_file_win32, se
 use notepad_win32::menu::{
     IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, ID_EDIT_ADD_CURSOR_BELOW,
     ID_EDIT_ADD_CURSOR_NEXT_MATCH, ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE,
-    ID_EDIT_UNDO, ID_VIEW_STATUS,
+    ID_EDIT_UNDO, ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_MARIANA, ID_FORMAT_THEME_MONOKAI,
+    ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS,
 };
+use notepad_win32::theme::ThemePreset;
 use notepad_win32::window::{create_notepad_window, NotepadAppState};
 use notepad_win32::word_wrap::{WordWrap, ID_FORMAT_WORDWRAP};
 use std::path::PathBuf;
@@ -191,7 +193,72 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
             "[OK] 8. Verified Multi-Cursor (Ctrl+Alt+Down, Ctrl+D) & Block Selection (Shift+Alt+Arrows) state and HWND sync"
         );
 
-        // 8. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
+        // 8. Test Sublime-inspired Theme Presets & Line-Number Gutter Layout
+        assert_eq!(state.theme_preset, ThemePreset::MarianaDark);
+        assert!(state.line_numbers_visible);
+        assert_eq!(state.gutter_layout.digit_count, 2);
+        let width_2_digits = state.gutter_layout.total_width;
+        assert!(width_2_digits > 0);
+
+        // Switch theme to Monokai Dark & Breakers Light and back to Mariana Dark
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_FORMAT_THEME_MONOKAI as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.theme_preset, ThemePreset::MonokaiDark);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_FORMAT_THEME_BREAKERS as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.theme_preset, ThemePreset::BreakersLight);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_FORMAT_THEME_MARIANA as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.theme_preset, ThemePreset::MarianaDark);
+
+        // Populate 120 lines and verify dynamic gutter expansion from 2 digits to 3 digits
+        let many_lines: String = (1..=120)
+            .map(|i| format!("line {}", i))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        state.multi_cursor.set_text(many_lines);
+        state.sync_to_hwnd_edit(false);
+        assert_eq!(state.gutter_layout.digit_count, 3);
+        assert!(
+            state.gutter_layout.total_width > width_2_digits,
+            "Gutter width must expand when crossing 99 -> 120 lines"
+        );
+
+        // Toggle line numbers off and back on
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_VIEW_LINE_NUMBERS as usize)),
+            Some(LPARAM(0)),
+        );
+        assert!(!state.line_numbers_visible);
+        assert_eq!(state.gutter_layout.total_width, 0);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_VIEW_LINE_NUMBERS as usize)),
+            Some(LPARAM(0)),
+        );
+        assert!(state.line_numbers_visible);
+        assert!(state.gutter_layout.total_width > width_2_digits);
+        println!(
+            "[OK] 9. Verified Sublime Theme Presets (Mariana/Monokai/Breakers) & Dynamic Line-Number Gutter (2 -> 3 digits: {}px -> {}px)",
+            width_2_digits, state.gutter_layout.total_width
+        );
+
+        // 9. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
         set_edit_text(state.hwnd_edit, "");
         let _ = std::fs::remove_file(&temp_file);
         SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
@@ -199,7 +266,7 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
         // Drain the queued WM_QUIT message posted by PostQuitMessage(0)
         let mut msg = MSG::default();
         let _ = GetMessageW(&mut msg, None, 0, 0);
-        println!("[OK] 9. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
+        println!("[OK] 10. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
     }
 
     println!("=== All Win32 Lifecycle Checks Passed! ===");
