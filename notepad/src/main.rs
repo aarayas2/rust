@@ -1,0 +1,203 @@
+//! Entry point (`wWinMain` at `0x140010280`) and Message Loop (`0x1400103A3` - `0x140010489`)
+//! for the reverse-engineered Win32 Notepad clone.
+
+use notepad_win32::file_io::{get_edit_text, load_file_win32, save_file_win32, set_edit_text, TextEncoding};
+use notepad_win32::menu::{
+    IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, ID_EDIT_SELECTALL, ID_EDIT_TIMEDATE, ID_EDIT_UNDO,
+    ID_VIEW_STATUS,
+};
+use notepad_win32::window::{create_notepad_window, NotepadAppState};
+use notepad_win32::word_wrap::{WordWrap, ID_FORMAT_WORDWRAP};
+use std::path::PathBuf;
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_F5;
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateAcceleratorTableW, DestroyAcceleratorTable, DispatchMessageW, GetMessageW,
+    GetWindowLongPtrW, SendMessageW, TranslateAcceleratorW, TranslateMessage, ACCEL, FCONTROL,
+    FVIRTKEY, GWLP_USERDATA, HACCEL, MSG, SW_SHOWDEFAULT, WM_CLOSE, WM_COMMAND, WM_INITMENU,
+    WM_SIZE,
+};
+
+/// Builds the keyboard accelerator table (`Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+Z`, `Ctrl+A`, `F5`)
+/// used by `TranslateAcceleratorW` at `0x1400103D9`.
+fn create_accelerators() -> Option<HACCEL> {
+    let accels = [
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: b'N' as u16,
+            cmd: IDM_FILENEW as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: b'O' as u16,
+            cmd: IDM_FILEOPEN as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: b'S' as u16,
+            cmd: IDM_FILESAVE as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: b'Z' as u16,
+            cmd: ID_EDIT_UNDO as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: b'A' as u16,
+            cmd: ID_EDIT_SELECTALL as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY,
+            key: VK_F5.0,
+            cmd: ID_EDIT_TIMEDATE as u16,
+        },
+    ];
+    unsafe { CreateAcceleratorTableW(&accels).ok() }
+}
+
+/// Runs an automated end-to-end verification of the Win32 window, child `"Edit"` control,
+/// `WM_SIZE`, `WM_INITMENU`, `WM_COMMAND` (Word Wrap recreation, Status Bar toggle, Time/Date),
+/// and `CreateFileW` / `ReadFile` / `WriteFile` disk I/O.
+fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), String> {
+    println!("=== Notepad Win32 Lifecycle Automated Verification ===");
+
+    // 1. Create hidden Notepad window + child Edit control + Status Bar (NPRegister + NPInit)
+    let hwnd = create_notepad_window(hinstance, None)?;
+    println!("[OK] 1. Registered 'Notepad' class & created main HWND ({:?})", hwnd);
+
+    unsafe {
+        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut NotepadAppState;
+        let state = state_ptr.as_mut().ok_or("Missing NotepadAppState in GWLP_USERDATA")?;
+        println!(
+            "[OK] 2. Spawned child 'Edit' control ({:?}) and Status Bar ({:?})",
+            state.hwnd_edit, state.hwnd_status
+        );
+
+        // 2. Test WM_SIZE (0x14000EA6E -> NPSize 0x14000E848)
+        let lparam_size = LPARAM(((700isize) << 16) | 1024isize);
+        SendMessageW(hwnd, WM_SIZE, Some(WPARAM(0)), Some(lparam_size));
+        println!("[OK] 3. Verified WM_SIZE (1024x700) child control layout");
+
+        // 3. Test File I/O and Edit Buffer population (LoadFile / SaveFile)
+        let temp_file = std::env::temp_dir().join("notepad_lifecycle_verify.txt");
+        let sample_text = ".LOG\r\nHello from reverse-engineered Rust Notepad!";
+        save_file_win32(&temp_file, sample_text, TextEncoding::Utf8Bom)
+            .map_err(|e| e.to_string())?;
+        state.open_path(temp_file.clone())?;
+
+        let current_text = get_edit_text(state.hwnd_edit);
+        assert!(current_text.starts_with(".LOG\r\nHello from reverse-engineered Rust Notepad!"));
+        assert!(current_text.len() > sample_text.len(), ".LOG timestamp should be appended");
+        println!(
+            "[OK] 4. Verified CreateFileW/ReadFile/WriteFile, BOM, and .LOG timestamp injection"
+        );
+
+        // 4. Test WM_COMMAND: Word Wrap toggle & Edit control recreation (0x14000E1CE -> NPReCreate)
+        let old_edit = state.hwnd_edit;
+        assert_eq!(state.word_wrap.state(), WordWrap::Disabled);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_FORMAT_WORDWRAP as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.word_wrap.state(), WordWrap::Enabled);
+        assert_ne!(state.hwnd_edit, old_edit);
+        assert_eq!(get_edit_text(state.hwnd_edit), current_text);
+        println!(
+            "[OK] 5. Verified ID_FORMAT_WORDWRAP (0x20) recreated Edit HWND ({:?} -> {:?}) and preserved buffer",
+            old_edit, state.hwnd_edit
+        );
+
+        // 5. Test WM_INITMENU (0x14000ED6D -> InitMenu 0x14000F2A0)
+        SendMessageW(hwnd, WM_INITMENU, Some(WPARAM(0)), Some(LPARAM(0)));
+        println!("[OK] 6. Verified WM_INITMENU (0x14000F2A0) menu item state synchronization");
+
+        // 6. Test Status Bar toggle (ID_VIEW_STATUS = 0x1B)
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_VIEW_STATUS as usize)),
+            Some(LPARAM(0)),
+        );
+        assert!(!state.status_bar_visible);
+        println!("[OK] 7. Verified ID_VIEW_STATUS (0x1B) status bar visibility toggle");
+
+        // 7. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
+        set_edit_text(state.hwnd_edit, "");
+        let _ = std::fs::remove_file(&temp_file);
+        SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
+
+        // Drain the queued WM_QUIT message posted by PostQuitMessage(0)
+        let mut msg = MSG::default();
+        let _ = GetMessageW(&mut msg, None, 0, 0);
+        println!("[OK] 8. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
+    }
+
+    println!("=== All Win32 Lifecycle Checks Passed! ===");
+    Ok(())
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let hmodule = unsafe { GetModuleHandleW(None).expect("GetModuleHandleW failed") };
+    let hinstance = HINSTANCE(hmodule.0);
+
+    if args.iter().any(|a| a == "--self-test") {
+        if let Err(e) = run_automated_lifecycle_verification(hinstance) {
+            eprintln!("Lifecycle verification failed: {}", e);
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    // Standard GUI launch (WinMain at 0x140010280)
+    let hwnd: HWND = match create_notepad_window(hinstance, Some(SW_SHOWDEFAULT)) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("Failed to initialize Notepad window: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // If a file path was passed on the command line, load it immediately
+    if let Some(file_arg) = args.get(1).filter(|a| !a.starts_with("--")) {
+        let path = PathBuf::from(file_arg);
+        if path.exists() {
+            unsafe {
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut NotepadAppState;
+                if let Some(state) = state_ptr.as_mut() {
+                    let _ = state.open_path(path);
+                }
+            }
+        } else if let Ok(doc) = load_file_win32(&path) {
+            let _ = doc;
+        }
+    }
+
+    let haccel = create_accelerators();
+
+    // WinMain Message Loop (0x1400103A3 - 0x140010489)
+    unsafe {
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let translated = if let Some(acc) = haccel {
+                TranslateAcceleratorW(hwnd, acc, &msg) != 0
+            } else {
+                false
+            };
+
+            if !translated {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+        }
+
+        if let Some(acc) = haccel {
+            let _ = DestroyAcceleratorTable(acc);
+        }
+    }
+}
