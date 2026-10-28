@@ -29,6 +29,7 @@ use crate::file_io::{
     get_edit_text, is_edit_modified, load_file_win32, save_file_win32, set_edit_modified,
     set_edit_text, TextEncoding,
 };
+use crate::font::{format_sublime_window_title, FontState};
 use crate::menu::{
     create_notepad_menu, init_menu, EditorState, EM_GETSEL, EM_REPLACESEL, EM_SCROLLCARET,
     EM_SETSEL, EM_UNDO, IDM_FILEEXIT, IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, IDM_FILESAVEAS,
@@ -36,7 +37,9 @@ use crate::menu::{
     ID_EDIT_ADD_CURSOR_BELOW, ID_EDIT_ADD_CURSOR_NEXT_MATCH, ID_EDIT_CLEAR, ID_EDIT_COPY,
     ID_EDIT_CUT, ID_EDIT_PASTE, ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE,
     ID_EDIT_UNDO, ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_CLASSIC, ID_FORMAT_THEME_MARIANA,
-    ID_FORMAT_THEME_MONOKAI, ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS,
+    ID_FORMAT_THEME_MONOKAI, ID_PREF_FONT_CASCADIA, ID_PREF_FONT_CONSOLAS, ID_PREF_FONT_COURIER,
+    ID_PREF_FONT_LARGER, ID_PREF_FONT_RESET, ID_PREF_FONT_SMALLER, ID_PREF_SHOW_FULL_PATH,
+    ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS,
 };
 use crate::save_dialog::{OpenFileDialog, SaveFileDialog};
 use crate::theme::{GutterLayout, Theme, ThemePreset};
@@ -46,15 +49,16 @@ use std::path::PathBuf;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetDC, GetStockObject,
-    GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, InvertRect, ReleaseDC, SelectObject,
-    SetBkColor, SetBkMode, SetTextColor, TextOutW, COLOR_WINDOW, DEFAULT_GUI_FONT, HBRUSH, HDC,
-    HGDIOBJ, PAINTSTRUCT, TEXTMETRICW, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetDC, GetDeviceCaps,
+    GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, InvertRect, ReleaseDC,
+    SelectObject, SetBkColor, SetBkMode, SetTextColor, TextOutW, COLOR_WINDOW, DEFAULT_GUI_FONT,
+    HBRUSH, HDC, HFONT, HGDIOBJ, LOGPIXELSY, PAINTSTRUCT, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE, VK_HOME,
-    VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_UP,
+    GetKeyState, SetFocus, VK_ADD, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE,
+    VK_HOME, VK_LEFT, VK_MENU, VK_NEXT, VK_NUMPAD0, VK_OEM_MINUS, VK_OEM_PLUS, VK_PRIOR, VK_RIGHT,
+    VK_SHIFT, VK_SUBTRACT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
@@ -128,6 +132,12 @@ pub struct NotepadAppState {
     pub line_numbers_visible: bool,
     /// Computed left gutter layout (`digit_count`, `char_zero_width`, `total_width`).
     pub gutter_layout: GutterLayout,
+    /// Editor font state (`font_face`, `font_size`, `default_font_size`) modeled after Sublime Text (`0x1400FEBF6..0x1400FEE5F`).
+    pub font_state: FontState,
+    /// Active GDI `HFONT` handle created for `hwnd_edit` and the line-number gutter.
+    pub edit_hfont: HFONT,
+    /// Whether to display the full file path in the window title bar (`"show_full_path"` at `0x1406BCD34`).
+    pub show_full_path: bool,
 }
 
 impl NotepadAppState {
@@ -138,7 +148,83 @@ impl NotepadAppState {
             status_bar_visible: self.status_bar_visible,
             line_numbers_visible: self.line_numbers_visible,
             theme_preset: self.theme_preset,
+            show_full_path: self.show_full_path,
         }
+    }
+
+    /// Queries the vertical logical DPI (`LOGPIXELSY`) of `self.hwnd_main` (falling back to `96`).
+    pub fn window_dpi(&self) -> i32 {
+        if self.hwnd_main.is_invalid() {
+            return 96;
+        }
+        unsafe {
+            let hdc = GetDC(Some(self.hwnd_main));
+            if hdc.is_invalid() {
+                return 96;
+            }
+            let dpi = GetDeviceCaps(Some(hdc), LOGPIXELSY);
+            let _ = ReleaseDC(Some(self.hwnd_main), hdc);
+            if dpi > 0 { dpi } else { 96 }
+        }
+    }
+
+    /// Recreates the GDI `HFONT` from `self.font_state`, applies it to `self.hwnd_edit` via `WM_SETFONT`,
+    /// recomputes the left gutter width for the new character metrics, and repaints the viewport immediately.
+    pub fn apply_font_state(&mut self) {
+        let dpi = self.window_dpi();
+        unsafe {
+            let new_font = self.font_state.create_gdi_font(dpi);
+            if !new_font.is_invalid() {
+                if !self.hwnd_edit.is_invalid() {
+                    SendMessageW(
+                        self.hwnd_edit,
+                        WM_SETFONT,
+                        Some(WPARAM(new_font.0 as usize)),
+                        Some(LPARAM(1)),
+                    );
+                }
+                if !self.edit_hfont.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(self.edit_hfont.0));
+                }
+                self.edit_hfont = new_font;
+            }
+            if !self.hwnd_edit.is_invalid() {
+                let _ = InvalidateRect(Some(self.hwnd_edit), None, true);
+            }
+        }
+        self.relayout_viewport();
+        self.update_window_title();
+        self.update_status_bar();
+    }
+
+    /// Executes `Preferences > Font > Larger` (`increase_font_size` at `0x1400FEBFE`).
+    pub fn cmd_font_larger(&mut self) {
+        self.font_state.increase_size();
+        self.apply_font_state();
+    }
+
+    /// Executes `Preferences > Font > Smaller` (`decrease_font_size` at `0x1400FECD2`).
+    pub fn cmd_font_smaller(&mut self) {
+        self.font_state.decrease_size();
+        self.apply_font_state();
+    }
+
+    /// Executes `Preferences > Font > Reset Size` (`reset_font_size` at `0x1400FEDA6`).
+    pub fn cmd_font_reset(&mut self) {
+        self.font_state.reset_size();
+        self.apply_font_state();
+    }
+
+    /// Executes `Preferences > Font > Choose: <Face>` (`choose_font` at `0x1400FEB08`).
+    pub fn cmd_font_set_face(&mut self, face: &str) {
+        self.font_state.set_face(face);
+        self.apply_font_state();
+    }
+
+    /// Toggles `"show_full_path"` (`0x1406BCD34`) and immediately refreshes the window title bar.
+    pub fn cmd_toggle_show_full_path(&mut self) {
+        self.show_full_path = !self.show_full_path;
+        self.update_window_title();
     }
 
     /// Switches the active color scheme preset, recreates GDI background brushes for
@@ -349,28 +435,28 @@ impl NotepadAppState {
         self.update_status_bar();
     }
 
-    /// Updates the main window title bar (`UpdateTitle` at `0x14000FE3C`), prefixing `*` when dirty.
+    /// Updates the main window title bar modeled after Sublime Text's title builder
+    /// (`0x140047900` – `0x140047F35` and `0x1401E20FB` – `0x1401E22E3`).
     pub fn update_window_title(&self) {
-        let file_name = self
-            .current_file
-            .as_ref()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "Untitled".to_string());
-
-        let dirty_prefix = if is_edit_modified(self.hwnd_edit) {
-            "*"
-        } else {
-            ""
-        };
-        let title = format!("{}{} - Notepad\0", dirty_prefix, file_name);
-        let wide: Vec<u16> = title.encode_utf16().collect();
+        if self.hwnd_main.is_invalid() {
+            return;
+        }
+        let is_dirty = is_edit_modified(self.hwnd_edit);
+        let formatted = format_sublime_window_title(
+            self.current_file.as_deref(),
+            self.multi_cursor.text(),
+            is_dirty,
+            self.show_full_path,
+            &self.font_state,
+        );
+        let title_nul = format!("{}\0", formatted);
+        let wide: Vec<u16> = title_nul.encode_utf16().collect();
         unsafe {
             let _ = SetWindowTextW(self.hwnd_main, PCWSTR(wide.as_ptr()));
         }
     }
 
-    /// Updates the status bar text (`Ln X, Col Y | [Cursors/Block] | 100% | Windows (CRLF) | UTF-8`).
+    /// Updates the status bar text (`Ln X, Col Y | [Cursors/Block] | Font Xpt (Y%) | Theme | Windows (CRLF) | UTF-8`).
     pub fn update_status_bar(&self) {
         if self.hwnd_status.is_invalid() || !self.status_bar_visible {
             return;
@@ -442,8 +528,15 @@ impl NotepadAppState {
         };
 
         let status_str = format!(
-            "  Ln {}, Col {}{}   |   {}   |   Windows (CRLF)   |   {}\0",
-            line, col, mode_badge, self.theme.name, enc_label
+            "  Ln {}, Col {}{}   |   {} {}pt ({}%)   |   {}   |   Windows (CRLF)   |   {}\0",
+            line,
+            col,
+            mode_badge,
+            self.font_state.font_face,
+            self.font_state.font_size,
+            self.font_state.scale_percent(),
+            self.theme.name,
+            enc_label
         );
         let wide: Vec<u16> = status_str.encode_utf16().collect();
         unsafe {
@@ -1259,6 +1352,25 @@ pub unsafe extern "system" fn edit_subclass_proc(
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let vk = wparam.0 as u16;
 
+            // 0. Sublime Text Font Scaling Shortcuts (`Default (Windows).sublime-keymap` lines 772-780):
+            //    - `Ctrl++` / `Ctrl+=` / `Ctrl+NumpadPlus` -> `increase_font_size` (`0x1400FEBF6`)
+            //    - `Ctrl+-` / `Ctrl+NumpadMinus`           -> `decrease_font_size` (`0x1400FECCA`)
+            //    - `Ctrl+0` / `Ctrl+Numpad0`               -> `reset_font_size` (`0x1400FED9E`)
+            if ctrl_down && !alt_down {
+                if vk == VK_OEM_PLUS.0 || vk == VK_ADD.0 {
+                    state.cmd_font_larger();
+                    return LRESULT(0);
+                }
+                if vk == VK_OEM_MINUS.0 || vk == VK_SUBTRACT.0 {
+                    state.cmd_font_smaller();
+                    return LRESULT(0);
+                }
+                if !shift_down && (vk == b'0' as u16 || vk == VK_NUMPAD0.0) {
+                    state.cmd_font_reset();
+                    return LRESULT(0);
+                }
+            }
+
             // 1. Ctrl+Alt+Up / Ctrl+Alt+Down -> Add cursor above / below
             if ctrl_down && alt_down && !shift_down {
                 if vk == VK_UP.0 {
@@ -1357,7 +1469,23 @@ pub unsafe extern "system" fn edit_subclass_proc(
             }
         }
 
-        WM_VSCROLL | WM_MOUSEWHEEL => {
+        WM_VSCROLL => {
+            let res = CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam);
+            state.render_gutter_direct();
+            return res;
+        }
+
+        WM_MOUSEWHEEL => {
+            // Sublime Text `Default (Windows).sublime-mousemap`: Ctrl+Scroll Wheel zooms font size
+            if ctrl_down && !alt_down {
+                let delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
+                if delta > 0 {
+                    state.cmd_font_larger();
+                } else if delta < 0 {
+                    state.cmd_font_smaller();
+                }
+                return LRESULT(0);
+            }
             let res = CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam);
             state.render_gutter_direct();
             return res;
@@ -1562,14 +1690,16 @@ pub fn create_notepad_window(
         status_bg_brush,
         line_numbers_visible: true,
         gutter_layout: initial_gutter,
+        font_state: FontState::default(),
+        edit_hfont: HFONT::default(),
+        show_full_path: true,
     });
     let state_ptr = Box::into_raw(state);
     unsafe {
         SetWindowLongPtrW(hwnd_main, GWLP_USERDATA, state_ptr as isize);
         attach_edit_subclass(hwnd_edit, state_ptr);
         if let Some(state_ref) = state_ptr.as_mut() {
-            state_ref.relayout_viewport();
-            state_ref.update_status_bar();
+            state_ref.apply_font_state();
         }
         if let Some(cmd) = show_cmd {
             let _ = ShowWindow(hwnd_main, cmd);
@@ -1787,9 +1917,30 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                         ) {
                             state.hwnd_edit = new_edit;
                             attach_edit_subclass(new_edit, state_ptr);
-                            state.relayout_viewport();
+                            state.apply_font_state();
                             state.sync_from_hwnd_edit();
                         }
+                    }
+                    ID_PREF_FONT_LARGER => {
+                        state.cmd_font_larger();
+                    }
+                    ID_PREF_FONT_SMALLER => {
+                        state.cmd_font_smaller();
+                    }
+                    ID_PREF_FONT_RESET => {
+                        state.cmd_font_reset();
+                    }
+                    ID_PREF_FONT_CONSOLAS => {
+                        state.cmd_font_set_face("Consolas");
+                    }
+                    ID_PREF_FONT_CASCADIA => {
+                        state.cmd_font_set_face("Cascadia Mono");
+                    }
+                    ID_PREF_FONT_COURIER => {
+                        state.cmd_font_set_face("Courier New");
+                    }
+                    ID_PREF_SHOW_FULL_PATH => {
+                        state.cmd_toggle_show_full_path();
                     }
                     ID_FORMAT_THEME_MARIANA => {
                         state.set_theme_preset(ThemePreset::MarianaDark);
@@ -1867,6 +2018,9 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                 }
                 if !state.status_bg_brush.is_invalid() {
                     let _ = DeleteObject(HGDIOBJ(state.status_bg_brush.0));
+                }
+                if !state.edit_hfont.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(state.edit_hfont.0));
                 }
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 let _ = Box::from_raw(state_ptr);

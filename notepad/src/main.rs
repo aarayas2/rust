@@ -2,12 +2,16 @@
 //! for the reverse-engineered Win32 Notepad clone.
 
 use notepad_win32::cursor::{BlockDirection, Position2D};
-use notepad_win32::file_io::{get_edit_text, load_file_win32, save_file_win32, set_edit_text, TextEncoding};
+use notepad_win32::file_io::{
+    get_edit_text, load_file_win32, save_file_win32, set_edit_modified, set_edit_text, TextEncoding,
+};
+use notepad_win32::font::DEFAULT_WINDOWS_FONT_SIZE;
 use notepad_win32::menu::{
     IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, ID_EDIT_ADD_CURSOR_BELOW,
     ID_EDIT_ADD_CURSOR_NEXT_MATCH, ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE,
     ID_EDIT_UNDO, ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_MARIANA, ID_FORMAT_THEME_MONOKAI,
-    ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS,
+    ID_PREF_FONT_CASCADIA, ID_PREF_FONT_CONSOLAS, ID_PREF_FONT_LARGER, ID_PREF_FONT_RESET,
+    ID_PREF_FONT_SMALLER, ID_PREF_SHOW_FULL_PATH, ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS,
 };
 use notepad_win32::theme::ThemePreset;
 use notepad_win32::window::{create_notepad_window, NotepadAppState};
@@ -15,12 +19,14 @@ use notepad_win32::word_wrap::{WordWrap, ID_FORMAT_WORDWRAP};
 use std::path::PathBuf;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::VK_F5;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    VK_ADD, VK_F5, VK_NUMPAD0, VK_OEM_MINUS, VK_OEM_PLUS, VK_SUBTRACT,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateAcceleratorTableW, DestroyAcceleratorTable, DispatchMessageW, GetMessageW,
-    GetWindowLongPtrW, SendMessageW, TranslateAcceleratorW, TranslateMessage, ACCEL, FCONTROL,
-    FVIRTKEY, GWLP_USERDATA, HACCEL, MSG, SW_SHOWDEFAULT, WM_CLOSE, WM_COMMAND, WM_INITMENU,
-    WM_SIZE,
+    GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, SendMessageW, TranslateAcceleratorW,
+    TranslateMessage, ACCEL, FCONTROL, FVIRTKEY, GWLP_USERDATA, HACCEL, MSG, SW_SHOWDEFAULT,
+    WM_CLOSE, WM_COMMAND, WM_INITMENU, WM_SIZE,
 };
 
 /// Builds the keyboard accelerator table (`Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+Z`, `Ctrl+A`, `F5`)
@@ -57,8 +63,48 @@ fn create_accelerators() -> Option<HACCEL> {
             key: VK_F5.0,
             cmd: ID_EDIT_TIMEDATE as u16,
         },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: VK_OEM_PLUS.0,
+            cmd: ID_PREF_FONT_LARGER as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: VK_ADD.0,
+            cmd: ID_PREF_FONT_LARGER as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: VK_OEM_MINUS.0,
+            cmd: ID_PREF_FONT_SMALLER as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: VK_SUBTRACT.0,
+            cmd: ID_PREF_FONT_SMALLER as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: b'0' as u16,
+            cmd: ID_PREF_FONT_RESET as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: VK_NUMPAD0.0,
+            cmd: ID_PREF_FONT_RESET as u16,
+        },
     ];
     unsafe { CreateAcceleratorTableW(&accels).ok() }
+}
+
+unsafe fn read_window_title(hwnd: HWND) -> String {
+    let len = GetWindowTextLengthW(hwnd);
+    if len <= 0 {
+        return String::new();
+    }
+    let mut buf = vec![0u16; (len as usize) + 1];
+    let read = GetWindowTextW(hwnd, &mut buf);
+    String::from_utf16_lossy(&buf[..read.max(0) as usize])
 }
 
 /// Runs an automated end-to-end verification of the Win32 window, child `"Edit"` control,
@@ -258,7 +304,88 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
             width_2_digits, state.gutter_layout.total_width
         );
 
-        // 9. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
+        // 9. Test Sublime Font Scaling (`Preferences > Font > Larger / Smaller / Reset Size`) & Dynamic Window Title
+        assert_eq!(state.font_state.font_size, DEFAULT_WINDOWS_FONT_SIZE);
+        let gutter_width_11pt = state.gutter_layout.total_width;
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_PREF_FONT_LARGER as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.font_state.font_size, 12);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_PREF_FONT_LARGER as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.font_state.font_size, 13);
+        let gutter_width_13pt = state.gutter_layout.total_width;
+        assert!(
+            gutter_width_13pt >= gutter_width_11pt,
+            "Gutter width should scale with font size"
+        );
+
+        // Verify dynamic window title includes full path, dirty bullet (` •`), and `[13pt]` scale badge
+        set_edit_modified(state.hwnd_edit, true);
+        state.update_window_title();
+        let title_13pt = read_window_title(hwnd);
+        assert!(
+            title_13pt.contains("notepad_lifecycle_verify.txt \u{2022} [13pt] - Notepad"),
+            "Unexpected title at 13pt: {}",
+            title_13pt
+        );
+
+        // Toggle `show_full_path` off and verify filename-only title
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_PREF_SHOW_FULL_PATH as usize)),
+            Some(LPARAM(0)),
+        );
+        assert!(!state.show_full_path);
+        let title_short = read_window_title(hwnd);
+        assert_eq!(
+            title_short,
+            "notepad_lifecycle_verify.txt \u{2022} [13pt] - Notepad"
+        );
+
+        // Test `Smaller` and `Reset Size` (`0x1400FECCA` & `0x1400FED9E`) and font family switch
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_PREF_FONT_SMALLER as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.font_state.font_size, 12);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_PREF_FONT_RESET as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.font_state.font_size, DEFAULT_WINDOWS_FONT_SIZE);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_PREF_FONT_CASCADIA as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.font_state.font_face, "Cascadia Mono");
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_PREF_FONT_CONSOLAS as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.font_state.font_face, "Consolas");
+        println!(
+            "[OK] 10. Verified Sublime Font Scaling (Larger/Smaller/Reset: 11pt -> 13pt -> 11pt, gutter {}px -> {}px) & Dynamic Window Title ('{}')",
+            gutter_width_11pt, gutter_width_13pt, title_short
+        );
+
+        // 10. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
         set_edit_text(state.hwnd_edit, "");
         let _ = std::fs::remove_file(&temp_file);
         SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
@@ -266,7 +393,7 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
         // Drain the queued WM_QUIT message posted by PostQuitMessage(0)
         let mut msg = MSG::default();
         let _ = GetMessageW(&mut msg, None, 0, 0);
-        println!("[OK] 10. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
+        println!("[OK] 11. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
     }
 
     println!("=== All Win32 Lifecycle Checks Passed! ===");

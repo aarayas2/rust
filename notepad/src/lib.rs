@@ -17,6 +17,7 @@
 
 pub mod cursor;
 pub mod file_io;
+pub mod font;
 pub mod menu;
 pub mod save_dialog;
 pub mod theme;
@@ -31,6 +32,10 @@ pub use cursor::{
 pub use file_io::{
     decode_notepad_bytes, encode_notepad_bytes, get_edit_text, is_edit_modified, load_file_win32,
     save_file_win32, set_edit_modified, set_edit_text, LoadedDocument, TextEncoding,
+};
+pub use font::{
+    format_sublime_window_title, FontState, DEFAULT_WINDOWS_FONT_FACE, DEFAULT_WINDOWS_FONT_SIZE,
+    MAX_FONT_SIZE, MIN_MENU_FONT_SIZE, MIN_VIEW_FONT_SIZE,
 };
 pub use menu::{create_notepad_menu, init_menu, EditorState};
 pub use save_dialog::{OpenFileDialog, SaveDialogError, SaveFileDialog};

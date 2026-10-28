@@ -57,7 +57,8 @@ pub const CF_UNICODETEXT: u32 = 13;
 pub const FILE_MENU_INDEX: i32 = 0;
 pub const EDIT_MENU_INDEX: i32 = 1;
 pub const VIEW_MENU_INDEX: i32 = 3;
-pub const HELP_MENU_INDEX: i32 = 4;
+pub const PREFERENCES_MENU_INDEX: i32 = 4;
+pub const HELP_MENU_INDEX: i32 = 5;
 
 // Notepad File Menu Command IDs (0x14000DAFA - 0x14000DB2E)
 pub const IDM_FILENEW: u32 = 0x01;
@@ -92,11 +93,21 @@ pub const ID_VIEW_STATUS: u32 = 0x1B;
 pub const ID_VIEW_LINE_NUMBERS: u32 = 0x60;
 pub const IDM_HELP_ABOUT: u32 = 0x41;
 
-// Sublime-inspired Color Scheme Theme Command IDs (Format Menu)
+// Sublime-inspired Color Scheme Theme Command IDs (Format & Preferences Menus)
 pub const ID_FORMAT_THEME_MARIANA: u32 = 0x61;
 pub const ID_FORMAT_THEME_MONOKAI: u32 = 0x62;
 pub const ID_FORMAT_THEME_BREAKERS: u32 = 0x63;
 pub const ID_FORMAT_THEME_CLASSIC: u32 = 0x64;
+
+// Sublime-inspired Preferences > Font > Larger / Smaller / Reset Size Command IDs
+// (`Main.sublime-menu` lines 956-966: `increase_font_size`, `decrease_font_size`, `reset_font_size`, `choose_font`)
+pub const ID_PREF_FONT_LARGER: u32 = 0x70;
+pub const ID_PREF_FONT_SMALLER: u32 = 0x71;
+pub const ID_PREF_FONT_RESET: u32 = 0x72;
+pub const ID_PREF_FONT_CONSOLAS: u32 = 0x73;
+pub const ID_PREF_FONT_CASCADIA: u32 = 0x74;
+pub const ID_PREF_FONT_COURIER: u32 = 0x75;
+pub const ID_PREF_SHOW_FULL_PATH: u32 = 0x76;
 
 /// Represents the synchronized editor state inspected during `WM_INITMENU`.
 #[derive(Debug, Clone, Copy)]
@@ -105,6 +116,7 @@ pub struct EditorState {
     pub status_bar_visible: bool,
     pub line_numbers_visible: bool,
     pub theme_preset: ThemePreset,
+    pub show_full_path: bool,
 }
 
 fn append_menu_str(hmenu: HMENU, flags: MENU_ITEM_FLAGS, id: usize, text: &str) {
@@ -256,7 +268,58 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
         );
         append_menu_str(menu_bar, MF_POPUP, view_menu.0 as usize, "&View");
 
-        // Submenu 4: Help
+        // Submenu 4: Preferences (Sublime Text `Main.sublime-menu` lines 900-968)
+        let pref_menu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (Preferences) failed")?;
+        let font_submenu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (Font) failed")?;
+        append_menu_str(
+            font_submenu,
+            MF_STRING,
+            ID_PREF_FONT_LARGER as usize,
+            "&Larger\tCtrl+Plus",
+        );
+        append_menu_str(
+            font_submenu,
+            MF_STRING,
+            ID_PREF_FONT_SMALLER as usize,
+            "&Smaller\tCtrl+Minus",
+        );
+        let _ = AppendMenuW(font_submenu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_menu_str(
+            font_submenu,
+            MF_STRING,
+            ID_PREF_FONT_RESET as usize,
+            "&Reset Size\tCtrl+0",
+        );
+        let _ = AppendMenuW(font_submenu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_menu_str(
+            font_submenu,
+            MF_STRING,
+            ID_PREF_FONT_CONSOLAS as usize,
+            "Choose: &Consolas (Default)",
+        );
+        append_menu_str(
+            font_submenu,
+            MF_STRING,
+            ID_PREF_FONT_CASCADIA as usize,
+            "Choose: C&ascadia Mono",
+        );
+        append_menu_str(
+            font_submenu,
+            MF_STRING,
+            ID_PREF_FONT_COURIER as usize,
+            "Choose: Courier &New",
+        );
+        append_menu_str(pref_menu, MF_POPUP, font_submenu.0 as usize, "&Font");
+        let _ = AppendMenuW(pref_menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_menu_str(
+            pref_menu,
+            MF_STRING,
+            ID_PREF_SHOW_FULL_PATH as usize,
+            "Show &Full Path in Title Bar",
+        );
+        append_menu_str(menu_bar, MF_POPUP, pref_menu.0 as usize, "Prefere&nces");
+
+        // Submenu 5: Help
         let help_menu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (Help) failed")?;
         append_menu_str(
             help_menu,
@@ -289,6 +352,7 @@ pub fn init_menu(
         let edit_menu = GetSubMenu(hmenu, EDIT_MENU_INDEX);
         let format_menu = GetSubMenu(hmenu, FORMAT_MENU_INDEX);
         let view_menu = GetSubMenu(hmenu, VIEW_MENU_INDEX);
+        let pref_menu = GetSubMenu(hmenu, PREFERENCES_MENU_INDEX);
 
         // 1. Check selection state (SendMessageW EM_GETSEL at 0x14000F2EC)
         let mut sel_start: u32 = 0;
@@ -385,6 +449,16 @@ pub fn init_menu(
                 MF_UNCHECKED
             } | MF_BYCOMMAND;
             CheckMenuItem(view_menu, ID_VIEW_LINE_NUMBERS, gutter_check.0);
+        }
+
+        // 8. Preferences Menu: CheckMenuItem for Show Full Path in Title Bar
+        if !pref_menu.is_invalid() {
+            let full_path_check = if state.show_full_path {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            } | MF_BYCOMMAND;
+            CheckMenuItem(pref_menu, ID_PREF_SHOW_FULL_PATH, full_path_check.0);
         }
     }
 
