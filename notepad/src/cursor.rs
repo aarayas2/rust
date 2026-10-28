@@ -833,7 +833,7 @@ impl MultiCursorEditor {
             return None;
         }
 
-        let range = primary_range.unwrap();
+        let range = primary_range?;
         let needle = self.text[range.clone()].to_string();
         if needle.is_empty() {
             return None;
@@ -1229,7 +1229,9 @@ impl MultiCursorEditor {
         if clamped + 1 < bytes.len() && bytes[clamped] == b'\r' && bytes[clamped + 1] == b'\n' {
             return clamped + 2;
         }
-        let ch = self.text[clamped..].chars().next().unwrap();
+        let Some(ch) = self.text[clamped..].chars().next() else {
+            return clamped;
+        };
         clamped + ch.len_utf8()
     }
 

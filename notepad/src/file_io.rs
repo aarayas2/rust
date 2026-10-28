@@ -323,7 +323,8 @@ pub fn normalize_crlf(input: &str) -> String {
         if c == '\r' {
             out.push('\r');
             if chars.peek() == Some(&'\n') {
-                out.push(chars.next().unwrap());
+                let _ = chars.next();
+                out.push('\n');
             } else {
                 out.push('\n');
             }

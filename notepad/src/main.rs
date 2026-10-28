@@ -2,16 +2,19 @@
 //! for the reverse-engineered Win32 Notepad clone.
 
 use notepad_win32::cursor::{BlockDirection, Position2D};
+use notepad_win32::file_explorer::DEFAULT_SIDEBAR_WIDTH;
 use notepad_win32::file_io::{
     get_edit_text, load_file_win32, save_file_win32, set_edit_modified, set_edit_text, TextEncoding,
 };
 use notepad_win32::font::DEFAULT_WINDOWS_FONT_SIZE;
 use notepad_win32::menu::{
-    IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, ID_EDIT_ADD_CURSOR_BELOW,
-    ID_EDIT_ADD_CURSOR_NEXT_MATCH, ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE,
-    ID_EDIT_UNDO, ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_MARIANA, ID_FORMAT_THEME_MONOKAI,
+    IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, IDM_FILE_CLOSE_TAB, IDM_FILE_OPEN_FOLDER,
+    IDM_TAB_NEXT, IDM_TAB_PREV, ID_EDIT_ADD_CURSOR_BELOW, ID_EDIT_ADD_CURSOR_NEXT_MATCH,
+    ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE, ID_EDIT_UNDO,
+    ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_MARIANA, ID_FORMAT_THEME_MONOKAI,
     ID_PREF_FONT_CASCADIA, ID_PREF_FONT_CONSOLAS, ID_PREF_FONT_LARGER, ID_PREF_FONT_RESET,
     ID_PREF_FONT_SMALLER, ID_PREF_SHOW_FULL_PATH, ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS,
+    ID_VIEW_TOGGLE_SIDEBAR,
 };
 use notepad_win32::theme::ThemePreset;
 use notepad_win32::window::{create_notepad_window, NotepadAppState};
@@ -20,16 +23,17 @@ use std::path::PathBuf;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VK_ADD, VK_F5, VK_NUMPAD0, VK_OEM_MINUS, VK_OEM_PLUS, VK_SUBTRACT,
+    VK_ADD, VK_F5, VK_NUMPAD0, VK_OEM_MINUS, VK_OEM_PLUS, VK_SUBTRACT, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateAcceleratorTableW, DestroyAcceleratorTable, DispatchMessageW, GetMessageW,
     GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, SendMessageW, TranslateAcceleratorW,
-    TranslateMessage, ACCEL, FCONTROL, FVIRTKEY, GWLP_USERDATA, HACCEL, MSG, SW_SHOWDEFAULT,
-    WM_CLOSE, WM_COMMAND, WM_INITMENU, WM_SIZE,
+    TranslateMessage, ACCEL, FCONTROL, FSHIFT, FVIRTKEY, GWLP_USERDATA, HACCEL, MSG,
+    SW_SHOWDEFAULT, WM_CLOSE, WM_COMMAND, WM_INITMENU, WM_SIZE,
 };
 
-/// Builds the keyboard accelerator table (`Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+Z`, `Ctrl+A`, `F5`)
+/// Builds the keyboard accelerator table (`Ctrl+N`, `Ctrl+O`, `Ctrl+Shift+O`, `Ctrl+S`, `Ctrl+W`,
+/// `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+B`, `Ctrl+Z`, `Ctrl+A`, `F5`)
 /// used by `TranslateAcceleratorW` at `0x1400103D9`.
 fn create_accelerators() -> Option<HACCEL> {
     let accels = [
@@ -44,9 +48,34 @@ fn create_accelerators() -> Option<HACCEL> {
             cmd: IDM_FILEOPEN as u16,
         },
         ACCEL {
+            fVirt: FVIRTKEY | FCONTROL | FSHIFT,
+            key: b'O' as u16,
+            cmd: IDM_FILE_OPEN_FOLDER as u16,
+        },
+        ACCEL {
             fVirt: FVIRTKEY | FCONTROL,
             key: b'S' as u16,
             cmd: IDM_FILESAVE as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: b'W' as u16,
+            cmd: IDM_FILE_CLOSE_TAB as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: b'B' as u16,
+            cmd: ID_VIEW_TOGGLE_SIDEBAR as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL,
+            key: VK_TAB.0,
+            cmd: IDM_TAB_NEXT as u16,
+        },
+        ACCEL {
+            fVirt: FVIRTKEY | FCONTROL | FSHIFT,
+            key: VK_TAB.0,
+            cmd: IDM_TAB_PREV as u16,
         },
         ACCEL {
             fVirt: FVIRTKEY | FCONTROL,
@@ -385,15 +414,133 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
             gutter_width_11pt, gutter_width_13pt, title_short
         );
 
-        // 10. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
+        // 10. Test Multi-Tab (`File > New`, switching, reordering, dirty `*`, `Ctrl+Tab`, closing)
+        //     and `File > Open Folder` (`D:\test` -> left pane tree -> preview vs pinned tab)
+        let test_folder = PathBuf::from(r"D:\test");
+        let created_d_test = !test_folder.exists();
+        let _ = std::fs::create_dir_all(&test_folder);
+        let file_alpha = test_folder.join("alpha.txt");
+        let file_beta = test_folder.join("beta.rs");
+        save_file_win32(&file_alpha, "Alpha file content", TextEncoding::Utf8)
+            .map_err(|e| e.to_string())?;
+        save_file_win32(&file_beta, "fn beta() -> u32 { 42 }", TextEncoding::Utf8)
+            .map_err(|e| e.to_string())?;
+
+        // Open Folder `D:\test` -> left pane tree becomes visible at 250px
+        state.open_folder_path(test_folder.clone())?;
+        assert!(state.file_explorer.is_visible);
+        assert_eq!(state.file_explorer.effective_width(), DEFAULT_SIDEBAR_WIDTH);
+        let tree_names: Vec<String> = state
+            .file_explorer
+            .flat_rows
+            .iter()
+            .map(|r| r.name.clone())
+            .collect();
+        assert!(tree_names.contains(&"alpha.txt".to_string()));
+        assert!(tree_names.contains(&"beta.rs".to_string()));
+
+        // Ensure current tab is clean so it doesn't prompt when switching/closing
+        set_edit_modified(state.hwnd_edit, false);
+        state.sync_from_hwnd_edit();
+
+        // Single-click `alpha.txt` in tree -> opens in preview tab (`is_preview = true`)
+        state.open_path_with_mode(file_alpha.clone(), true)?;
+        assert!(state.tab_manager.active_tab().is_preview);
+        assert_eq!(state.tab_manager.active_tab().title, "alpha.txt");
+
+        // Single-click `beta.rs` in tree -> replaces unmodified preview tab in-place!
+        let tab_count_before = state.tab_manager.tabs.len();
+        state.open_path_with_mode(file_beta.clone(), true)?;
+        assert_eq!(state.tab_manager.tabs.len(), tab_count_before);
+        assert!(state.tab_manager.active_tab().is_preview);
+        assert_eq!(state.tab_manager.active_tab().title, "beta.rs");
+        assert_eq!(get_edit_text(state.hwnd_edit), "fn beta() -> u32 { 42 }");
+
+        // Edit `beta.rs` -> auto-pins preview tab (`is_preview = false`) and displays `*` dirty indicator
+        set_edit_text(state.hwnd_edit, "fn beta() -> u32 { 99 }");
+        set_edit_modified(state.hwnd_edit, true);
+        state.sync_from_hwnd_edit();
+        assert!(!state.tab_manager.active_tab().is_preview);
+        assert!(state.tab_manager.active_tab().is_dirty);
+        assert_eq!(state.tab_manager.active_tab().display_label(), "beta.rs *");
+
+        // `File > New` (`IDM_FILENEW`) -> creates a new tab
+        let count_before_new = state.tab_manager.tabs.len();
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(IDM_FILENEW as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.tab_manager.tabs.len(), count_before_new + 1);
+        assert_eq!(state.tab_manager.active_tab().title, "Untitled");
+
+        // `Ctrl+Tab` (`IDM_TAB_NEXT`) & `Ctrl+Shift+Tab` (`IDM_TAB_PREV`) switch tabs and preserve buffers
+        let idx_before = state.tab_manager.active_index;
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(IDM_TAB_PREV as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_ne!(state.tab_manager.active_index, idx_before);
+        assert_eq!(get_edit_text(state.hwnd_edit), "fn beta() -> u32 { 99 }");
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(IDM_TAB_NEXT as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.tab_manager.active_index, idx_before);
+
+        // Drag-to-reorder tabs and close tab (`Ctrl+W` / `IDM_FILE_CLOSE_TAB`)
+        assert!(state.tab_manager.reorder_tab(idx_before, 0));
+        assert_eq!(state.tab_manager.active_index, 0);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(IDM_FILE_CLOSE_TAB as usize)),
+            Some(LPARAM(0)),
+        );
+        assert_eq!(state.tab_manager.tabs.len(), count_before_new);
+
+        // Toggle Side Bar (`View > Toggle Side Bar` / `ID_VIEW_TOGGLE_SIDEBAR`)
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_VIEW_TOGGLE_SIDEBAR as usize)),
+            Some(LPARAM(0)),
+        );
+        assert!(!state.file_explorer.is_visible);
+        SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(ID_VIEW_TOGGLE_SIDEBAR as usize)),
+            Some(LPARAM(0)),
+        );
+        assert!(state.file_explorer.is_visible);
+        println!(
+            "[OK] 11. Verified Multi-Tab (New/Switch/Reorder/Close/Dirty '*') & Open Folder ('D:\\test' left tree, preview vs pinned tab, Ctrl+Tab)"
+        );
+
+        // 11. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
+        for tab in &mut state.tab_manager.tabs {
+            tab.is_dirty = false;
+        }
+        set_edit_modified(state.hwnd_edit, false);
         set_edit_text(state.hwnd_edit, "");
         let _ = std::fs::remove_file(&temp_file);
+        let _ = std::fs::remove_file(&file_alpha);
+        let _ = std::fs::remove_file(&file_beta);
+        if created_d_test {
+            let _ = std::fs::remove_dir(&test_folder);
+        }
         SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
 
         // Drain the queued WM_QUIT message posted by PostQuitMessage(0)
         let mut msg = MSG::default();
         let _ = GetMessageW(&mut msg, None, 0, 0);
-        println!("[OK] 11. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
+        println!("[OK] 12. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
     }
 
     println!("=== All Win32 Lifecycle Checks Passed! ===");
@@ -403,7 +550,7 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    let hmodule = unsafe { GetModuleHandleW(None).expect("GetModuleHandleW failed") };
+    let hmodule = unsafe { GetModuleHandleW(None).unwrap_or_default() };
     let hinstance = HINSTANCE(hmodule.0);
 
     if args.iter().any(|a| a == "--self-test") {
@@ -423,14 +570,18 @@ fn main() {
         }
     };
 
-    // If a file path was passed on the command line, load it immediately
-    if let Some(file_arg) = args.get(1).filter(|a| !a.starts_with("--")) {
-        let path = PathBuf::from(file_arg);
+    // If a file or folder path was passed on the command line, open it immediately
+    if let Some(path_arg) = args.get(1).filter(|a| !a.starts_with("--")) {
+        let path = PathBuf::from(path_arg);
         if path.exists() {
             unsafe {
                 let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut NotepadAppState;
                 if let Some(state) = state_ptr.as_mut() {
-                    let _ = state.open_path(path);
+                    if path.is_dir() {
+                        let _ = state.open_folder_path(path);
+                    } else {
+                        let _ = state.open_path(path);
+                    }
                 }
             }
         } else if let Ok(doc) = load_file_win32(&path) {

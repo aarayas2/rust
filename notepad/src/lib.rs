@@ -16,10 +16,12 @@
 //!   (`0x14000D078`) and `GetSaveFileNameW` (`0x14000D2E8`).
 
 pub mod cursor;
+pub mod file_explorer;
 pub mod file_io;
 pub mod font;
 pub mod menu;
 pub mod save_dialog;
+pub mod tabs;
 pub mod theme;
 pub mod window;
 pub mod word_wrap;
@@ -28,6 +30,9 @@ pub use cursor::{
     byte_to_utf16_offset, utf16_to_byte_offset, BlockDirection, Cursor, CursorId, Cursors,
     MoveDirection, MultiCursorEditor, Position2D, SelectionActiveSet, SelectionContext,
     SelectionMode,
+};
+pub use file_explorer::{
+    FileExplorer, FileNode, FlatTreeRow, SidebarHitTarget, DEFAULT_SIDEBAR_WIDTH,
 };
 pub use file_io::{
     decode_notepad_bytes, encode_notepad_bytes, get_edit_text, is_edit_modified, load_file_win32,
@@ -39,6 +44,7 @@ pub use font::{
 };
 pub use menu::{create_notepad_menu, init_menu, EditorState};
 pub use save_dialog::{OpenFileDialog, SaveDialogError, SaveFileDialog};
+pub use tabs::{Tab, TabHitTarget, TabManager, TabRect, TAB_BAR_HEIGHT};
 pub use theme::{GutterLayout, RgbColor, Theme, ThemePreset};
 pub use window::{create_notepad_window, notepad_wnd_proc, register_notepad_class, NotepadAppState};
 pub use word_wrap::{WordWrap, WordWrapManager};

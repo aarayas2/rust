@@ -25,6 +25,7 @@
 use crate::cursor::{
     byte_to_utf16_offset, utf16_to_byte_offset, BlockDirection, MoveDirection, MultiCursorEditor,
 };
+use crate::file_explorer::{FileExplorer, SidebarHitTarget};
 use crate::file_io::{
     get_edit_text, is_edit_modified, load_file_win32, save_file_win32, set_edit_modified,
     set_edit_text, TextEncoding,
@@ -32,22 +33,27 @@ use crate::file_io::{
 use crate::font::{format_sublime_window_title, FontState};
 use crate::menu::{
     create_notepad_menu, init_menu, EditorState, EM_GETSEL, EM_REPLACESEL, EM_SCROLLCARET,
-    EM_SETSEL, EM_UNDO, IDM_FILEEXIT, IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, IDM_FILESAVEAS,
-    IDM_HELP_ABOUT, ID_EDIT_ADD_CURSORS_LINE_ENDS, ID_EDIT_ADD_CURSOR_ABOVE,
-    ID_EDIT_ADD_CURSOR_BELOW, ID_EDIT_ADD_CURSOR_NEXT_MATCH, ID_EDIT_CLEAR, ID_EDIT_COPY,
-    ID_EDIT_CUT, ID_EDIT_PASTE, ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE,
-    ID_EDIT_UNDO, ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_CLASSIC, ID_FORMAT_THEME_MARIANA,
+    EM_SETSEL, EM_UNDO, IDM_CTX_SIDEBAR_CLOSE_FOLDER, IDM_CTX_SIDEBAR_COPY_PATH,
+    IDM_CTX_SIDEBAR_NEW_FILE, IDM_CTX_SIDEBAR_OPEN, IDM_CTX_SIDEBAR_REFRESH, IDM_CTX_TAB_CLOSE,
+    IDM_CTX_TAB_CLOSE_OTHERS, IDM_CTX_TAB_CLOSE_RIGHT, IDM_CTX_TAB_CLOSE_UNMODIFIED, IDM_FILEEXIT,
+    IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, IDM_FILESAVEAS, IDM_FILE_CLOSE_TAB,
+    IDM_FILE_OPEN_FOLDER, IDM_HELP_ABOUT, IDM_TAB_NEXT, IDM_TAB_PREV,
+    ID_EDIT_ADD_CURSORS_LINE_ENDS, ID_EDIT_ADD_CURSOR_ABOVE, ID_EDIT_ADD_CURSOR_BELOW,
+    ID_EDIT_ADD_CURSOR_NEXT_MATCH, ID_EDIT_CLEAR, ID_EDIT_COPY, ID_EDIT_CUT, ID_EDIT_PASTE,
+    ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE, ID_EDIT_UNDO,
+    ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_CLASSIC, ID_FORMAT_THEME_MARIANA,
     ID_FORMAT_THEME_MONOKAI, ID_PREF_FONT_CASCADIA, ID_PREF_FONT_CONSOLAS, ID_PREF_FONT_COURIER,
     ID_PREF_FONT_LARGER, ID_PREF_FONT_RESET, ID_PREF_FONT_SMALLER, ID_PREF_SHOW_FULL_PATH,
-    ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS,
+    ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS, ID_VIEW_TOGGLE_SIDEBAR,
 };
 use crate::save_dialog::{OpenFileDialog, SaveFileDialog};
+use crate::tabs::{TabHitTarget, TabManager, TAB_BAR_HEIGHT};
 use crate::theme::{GutterLayout, Theme, ThemePreset};
 use crate::word_wrap::{create_edit_control, WordWrap, WordWrapManager, ID_FORMAT_WORDWRAP};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use windows::core::PCWSTR;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetDC, GetDeviceCaps,
     GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, InvertRect, ReleaseDC,
@@ -56,21 +62,24 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, VK_ADD, VK_BACK, VK_CONTROL, VK_DELETE, VK_DOWN, VK_END, VK_ESCAPE,
-    VK_HOME, VK_LEFT, VK_MENU, VK_NEXT, VK_NUMPAD0, VK_OEM_MINUS, VK_OEM_PLUS, VK_PRIOR, VK_RIGHT,
-    VK_SHIFT, VK_SUBTRACT, VK_UP,
+    GetKeyState, ReleaseCapture, SetCapture, SetFocus, VK_ADD, VK_BACK, VK_CONTROL, VK_DELETE,
+    VK_DOWN, VK_END, VK_ESCAPE, VK_HOME, VK_LEFT, VK_MENU, VK_NEXT, VK_NUMPAD0, VK_OEM_MINUS,
+    VK_OEM_PLUS, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_SUBTRACT, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallWindowProcW, CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect,
-    GetWindowLongPtrW, IsIconic, LoadCursorW, LoadIconW, MessageBoxW, MoveWindow, PostMessageW,
-    PostQuitMessage, RegisterClassExW, SendMessageW, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
-    CW_USEDEFAULT, GWLP_USERDATA, GWLP_WNDPROC, HMENU, IDC_IBEAM, IDI_APPLICATION, IDNO, IDYES,
-    MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_YESNOCANCEL, SW_HIDE, SW_SHOW, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WM_CHAR, WM_CLEAR, WM_CLOSE, WM_COMMAND, WM_COPY, WM_CTLCOLOREDIT,
-    WM_CTLCOLORSTATIC, WM_CUT, WM_DESTROY, WM_ERASEBKGND, WM_GETFONT, WM_INITMENU, WM_KEYDOWN,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_SETFOCUS,
-    WM_SETFONT, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_VSCROLL, WNDCLASSEXW, WNDPROC, WS_CHILD,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    AppendMenuW, CallWindowProcW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu,
+    DestroyWindow, GetClientRect, GetCursorPos, GetWindowLongPtrW, IsIconic, LoadCursorW,
+    LoadIconW, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
+    SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
+    TrackPopupMenu, CS_DBLCLKS, CW_USEDEFAULT, GWLP_USERDATA, GWLP_WNDPROC, HMENU, IDC_ARROW,
+    IDC_IBEAM, IDC_SIZEWE, IDI_APPLICATION, IDNO, IDYES, MB_ICONINFORMATION, MB_ICONWARNING,
+    MB_OK, MB_YESNOCANCEL, MF_SEPARATOR, MF_STRING, SW_HIDE, SW_SHOW, TPM_LEFTALIGN,
+    TPM_RETURNCMD, TPM_TOPALIGN, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_CLEAR, WM_CLOSE,
+    WM_COMMAND, WM_COPY, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_CUT, WM_DESTROY, WM_ERASEBKGND,
+    WM_GETFONT, WM_INITMENU, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_RBUTTONUP, WM_SETCURSOR,
+    WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL,
+    WNDCLASSEXW, WNDPROC, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 /// Window Class Name (`0x14002B828`: `"Notepad"`).
@@ -100,6 +109,9 @@ pub const EM_CHARFROMPOS: u32 = 0x00D7;
 /// Mouse button state mask for Left Mouse Button (`MK_LBUTTON = 0x0001`).
 const MK_LBUTTON_MASK: usize = 0x0001;
 
+/// Timer ID used to poll the `notify` directory watcher (`WM_TIMER`).
+pub const ID_WATCHER_TIMER: usize = 0x901;
+
 /// Complete runtime state for a Notepad window instance, stored safely in `GWLP_USERDATA`.
 pub struct NotepadAppState {
     pub hinstance: HINSTANCE,
@@ -112,6 +124,10 @@ pub struct NotepadAppState {
     pub encoding: TextEncoding,
     /// Multi-cursor and rectangular block-selection state engine.
     pub multi_cursor: MultiCursorEditor,
+    /// Multi-tab buffer manager (`Tab`, `TabManager`).
+    pub tab_manager: TabManager,
+    /// Left-pane folder explorer (`File > Open Folder...`).
+    pub file_explorer: FileExplorer,
     /// Original Win32 `WndProc` of the subclassed `"Edit"` control.
     pub edit_prev_wndproc: isize,
     /// Origin byte offset when performing an `Alt+Drag` rectangular block selection.
@@ -147,9 +163,94 @@ impl NotepadAppState {
             word_wrap: self.word_wrap.state(),
             status_bar_visible: self.status_bar_visible,
             line_numbers_visible: self.line_numbers_visible,
+            sidebar_visible: self.file_explorer.is_visible && self.file_explorer.root_path.is_some(),
             theme_preset: self.theme_preset,
             show_full_path: self.show_full_path,
         }
+    }
+
+    /// Snapshots the active editor state (`hwnd_edit` text, selection, scroll line, dirty state,
+    /// `current_file`, `encoding`, `multi_cursor`) into `self.tab_manager.active_tab_mut()`.
+    pub fn save_active_tab_state(&mut self) {
+        if self.hwnd_edit.is_invalid() || self.tab_manager.tabs.is_empty() {
+            return;
+        }
+        let text = get_edit_text(self.hwnd_edit);
+        let is_dirty = is_edit_modified(self.hwnd_edit);
+        let mut sel_start: u32 = 0;
+        let mut sel_end: u32 = 0;
+        let scroll_line = unsafe {
+            SendMessageW(
+                self.hwnd_edit,
+                EM_GETSEL,
+                Some(WPARAM(&mut sel_start as *mut u32 as usize)),
+                Some(LPARAM(&mut sel_end as *mut u32 as isize)),
+            );
+            SendMessageW(self.hwnd_edit, EM_GETFIRSTVISIBLELINE, None, None).0 as i32
+        };
+
+        let path = self.current_file.clone();
+        let encoding = self.encoding;
+        let multi_cursor = self.multi_cursor.clone();
+
+        let tab = self.tab_manager.active_tab_mut();
+        tab.content = text;
+        tab.is_dirty = is_dirty;
+        if is_dirty {
+            tab.is_preview = false;
+        }
+        tab.selection = (sel_start, sel_end);
+        tab.scroll_line = scroll_line;
+        tab.path = path.clone();
+        if let Some(ref p) = path {
+            if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                tab.title = name.to_string();
+            }
+        }
+        tab.encoding = encoding;
+        tab.multi_cursor = multi_cursor;
+    }
+
+    /// Loads `self.tab_manager.active_tab()` into `hwnd_edit`, `self.current_file`,
+    /// `self.encoding`, and `self.multi_cursor`, and refreshes the UI.
+    pub fn load_active_tab_state(&mut self) {
+        if self.hwnd_edit.is_invalid() || self.tab_manager.tabs.is_empty() {
+            return;
+        }
+        let tab = self.tab_manager.active_tab().clone();
+        self.syncing_to_hwnd = true;
+        self.current_file = tab.path.clone();
+        self.encoding = tab.encoding;
+        self.multi_cursor = tab.multi_cursor.clone();
+        if self.multi_cursor.text() != tab.content {
+            self.multi_cursor.set_text(&tab.content);
+        }
+
+        set_edit_text(self.hwnd_edit, &tab.content);
+        set_edit_modified(self.hwnd_edit, tab.is_dirty);
+
+        unsafe {
+            SendMessageW(
+                self.hwnd_edit,
+                EM_SETSEL,
+                Some(WPARAM(tab.selection.0 as usize)),
+                Some(LPARAM(tab.selection.1 as isize)),
+            );
+            SendMessageW(self.hwnd_edit, EM_SCROLLCARET, None, None);
+            let _ = InvalidateRect(Some(self.hwnd_edit), None, true);
+        }
+        self.syncing_to_hwnd = false;
+        self.file_explorer.selected_path = self.current_file.clone();
+
+        if self.refresh_gutter_layout() {
+            self.relayout_viewport();
+        } else {
+            unsafe {
+                self.render_chrome_direct();
+            }
+        }
+        self.update_window_title();
+        self.update_status_bar();
     }
 
     /// Queries the vertical logical DPI (`LOGPIXELSY`) of `self.hwnd_main` (falling back to `96`).
@@ -255,7 +356,7 @@ impl NotepadAppState {
         }
         self.update_status_bar();
         unsafe {
-            self.render_gutter_direct();
+            self.render_chrome_direct();
         }
     }
 
@@ -329,7 +430,7 @@ impl NotepadAppState {
         width_changed
     }
 
-    /// Queries the main window client area and repositions the left gutter, `"Edit"` control, and status bar.
+    /// Queries the main window client area and repositions the sidebar, tab bar, gutter, `"Edit"` control, and status bar.
     pub fn relayout_viewport(&mut self) {
         if self.hwnd_main.is_invalid() {
             return;
@@ -350,12 +451,13 @@ impl NotepadAppState {
         }
     }
 
-    /// Synchronizes `self.multi_cursor` from the native `hwnd_edit` control when in single-cursor mode.
+    /// Synchronizes `self.multi_cursor` and active `Tab` from the native `hwnd_edit` control.
     pub fn sync_from_hwnd_edit(&mut self) {
         if self.syncing_to_hwnd || self.hwnd_edit.is_invalid() {
             return;
         }
         let current_text = get_edit_text(self.hwnd_edit);
+        let is_dirty = is_edit_modified(self.hwnd_edit);
         let mut sel_start: u32 = 0;
         let mut sel_end: u32 = 0;
         unsafe {
@@ -367,15 +469,21 @@ impl NotepadAppState {
             );
         }
         self.multi_cursor.sync_from_single_selection(
-            current_text,
+            current_text.clone(),
             sel_start as usize,
             sel_end as usize,
         );
+        self.tab_manager.set_active_dirty(is_dirty);
+        let active_tab = self.tab_manager.active_tab_mut();
+        active_tab.content = current_text;
+        active_tab.selection = (sel_start, sel_end);
+        active_tab.multi_cursor = self.multi_cursor.clone();
+
         if self.refresh_gutter_layout() {
             self.relayout_viewport();
         } else {
             unsafe {
-                self.render_gutter_direct();
+                self.render_chrome_direct();
             }
         }
     }
@@ -388,11 +496,12 @@ impl NotepadAppState {
         self.syncing_to_hwnd = true;
 
         let current_hwnd_text = get_edit_text(self.hwnd_edit);
-        let target_text = self.multi_cursor.text();
+        let target_text = self.multi_cursor.text().to_string();
         if current_hwnd_text != target_text {
-            set_edit_text(self.hwnd_edit, target_text);
+            set_edit_text(self.hwnd_edit, &target_text);
             if mark_modified {
                 set_edit_modified(self.hwnd_edit, true);
+                self.tab_manager.set_active_dirty(true);
             }
         }
 
@@ -400,8 +509,6 @@ impl NotepadAppState {
         let (sel_start_byte, sel_end_byte) = if self.multi_cursor.cursors.is_multi()
             || self.multi_cursor.cursors.has_block_selection()
         {
-            // When multiple cursors or custom block selection are active, collapse the native
-            // single-selection highlight so our custom GDI overlay renders all selections cleanly.
             (primary.position, primary.position)
         } else if let Some(anchor) = primary.anchor {
             (anchor, primary.position)
@@ -424,11 +531,13 @@ impl NotepadAppState {
         }
 
         self.syncing_to_hwnd = false;
+        self.save_active_tab_state();
+
         if self.refresh_gutter_layout() {
             self.relayout_viewport();
         } else {
             unsafe {
-                self.render_gutter_direct();
+                self.render_chrome_direct();
             }
         }
         self.update_window_title();
@@ -456,7 +565,7 @@ impl NotepadAppState {
         }
     }
 
-    /// Updates the status bar text (`Ln X, Col Y | [Cursors/Block] | Font Xpt (Y%) | Theme | Windows (CRLF) | UTF-8`).
+    /// Updates the status bar text (`Ln X, Col Y | [Tabs/Folder] | [Cursors/Block] | Font Xpt (Y%) | Theme | UTF-8`).
     pub fn update_status_bar(&self) {
         if self.hwnd_status.is_invalid() || !self.status_bar_visible {
             return;
@@ -520,6 +629,22 @@ impl NotepadAppState {
             String::new()
         };
 
+        let tab_badge = format!(
+            "   |   Tab {}/{}",
+            self.tab_manager.active_index + 1,
+            self.tab_manager.tabs.len()
+        );
+
+        let folder_badge = if let Some(ref root) = self.file_explorer.root_path {
+            let folder_name = root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("Folder");
+            format!("   |   Folder: {}", folder_name)
+        } else {
+            String::new()
+        };
+
         let enc_label = match self.encoding {
             TextEncoding::Utf8 => "UTF-8",
             TextEncoding::Utf8Bom => "UTF-8-BOM",
@@ -528,9 +653,11 @@ impl NotepadAppState {
         };
 
         let status_str = format!(
-            "  Ln {}, Col {}{}   |   {} {}pt ({}%)   |   {}   |   Windows (CRLF)   |   {}\0",
+            "  Ln {}, Col {}{}{}{}   |   {} {}pt ({}%)   |   {}   |   {}\0",
             line,
             col,
+            tab_badge,
+            folder_badge,
             mode_badge,
             self.font_state.font_face,
             self.font_state.font_size,
@@ -544,35 +671,43 @@ impl NotepadAppState {
         }
     }
 
-    /// Resizes the left line-number gutter, child `"Edit"` control, and status bar to fit the
-    /// main window client area (`NPSize` at `0x14000E848` combined with Sublime Text's
-    /// viewport split at `0x1403A1AC6` and `0x140369FA9`).
+    /// Resizes `HSplit [FileExplorer | VBox [TabBar + Gutter + Editor]]` and bottom `StatusBar`.
     pub fn resize_children(&mut self, width: i32, height: i32) {
         let status_h = self.active_status_height();
-        let edit_h = (height - status_h).max(0);
+        let main_h = (height - status_h).max(0);
+
+        if self.file_explorer.is_visible && self.file_explorer.root_path.is_some() {
+            let max_sidebar = (width - 180).max(140);
+            self.file_explorer.width = self.file_explorer.width.clamp(140, max_sidebar);
+        }
+        let sidebar_w = self.file_explorer.effective_width();
+        let right_x = sidebar_w;
+        let right_w = (width - sidebar_w).max(0);
+
+        let edit_y = TAB_BAR_HEIGHT;
+        let edit_h = (main_h - TAB_BAR_HEIGHT).max(0);
 
         let _ = self.refresh_gutter_layout();
-        let (gutter_w, edit_x, edit_w) = self.gutter_layout.split_viewport(width);
+        let (gutter_w, rel_edit_x, edit_w) = self.gutter_layout.split_viewport(right_w);
+        let edit_x = right_x + rel_edit_x;
 
         unsafe {
             if !self.hwnd_edit.is_invalid() {
-                // Sublime 0x1403A1AC6 & 0x140369FA9: offset text viewport by gutter_w and subtract gutter_w from width
-                let _ = MoveWindow(self.hwnd_edit, edit_x, 0, edit_w, edit_h, true);
+                let _ = MoveWindow(self.hwnd_edit, edit_x, edit_y, edit_w, edit_h, true);
             }
             if !self.hwnd_status.is_invalid() && self.status_bar_visible {
-                // 0x14000E915: MoveWindow(g_hwndStatus, 0, cy - statusHeight, cx, statusHeight, TRUE)
-                let _ = MoveWindow(self.hwnd_status, 0, edit_h, width, status_h, true);
+                let _ = MoveWindow(self.hwnd_status, 0, main_h, width, status_h, true);
             }
-            if !self.hwnd_main.is_invalid() && gutter_w > 0 {
-                let gutter_rc = RECT {
+            if !self.hwnd_main.is_invalid() {
+                let chrome_rc = RECT {
                     left: 0,
                     top: 0,
-                    right: gutter_w,
-                    bottom: edit_h,
+                    right: (right_x + gutter_w).max(width),
+                    bottom: main_h,
                 };
-                let _ = InvalidateRect(Some(self.hwnd_main), Some(&gutter_rc), false);
+                let _ = InvalidateRect(Some(self.hwnd_main), Some(&chrome_rc), false);
             }
-            self.render_gutter_direct();
+            self.render_chrome_direct();
         }
     }
 
@@ -587,7 +722,7 @@ impl NotepadAppState {
             .current_file
             .as_ref()
             .map(|p| p.display().to_string())
-            .unwrap_or_else(|| "Untitled".to_string());
+            .unwrap_or_else(|| self.tab_manager.active_tab().title.clone());
 
         let prompt = format!("Do you want to save changes to {}?\0", name);
         let caption: Vec<u16> = "Notepad\0".encode_utf16().collect();
@@ -609,32 +744,16 @@ impl NotepadAppState {
         }
     }
 
-    /// Executes `IDM_FILENEW` (`0x01` -> `0x14000DF37` -> `New` at `0x1400118A0`).
+    /// Executes `IDM_FILENEW` (`File > New` / `Ctrl+N` / `+` button): creates a new untitled tab
+    /// immediately after the active tab (`new_file` at `0x14005AD24`).
     pub fn cmd_file_new(&mut self) {
-        if !self.check_save() {
-            return;
-        }
-        set_edit_text(self.hwnd_edit, "");
-        self.multi_cursor.set_text("");
-        self.current_file = None;
-        self.encoding = TextEncoding::Utf8;
-        if self.refresh_gutter_layout() {
-            self.relayout_viewport();
-        } else {
-            unsafe {
-                self.render_gutter_direct();
-            }
-        }
-        self.update_window_title();
-        self.update_status_bar();
+        self.save_active_tab_state();
+        self.tab_manager.new_tab();
+        self.load_active_tab_state();
     }
 
     /// Executes `IDM_FILEOPEN` (`0x02` -> `0x14000DE00` -> `LoadFile` at `0x140010F48`).
     pub fn cmd_file_open(&mut self) {
-        if !self.check_save() {
-            return;
-        }
-
         match OpenFileDialog::new(self.hwnd_main).show() {
             Ok(Some(path)) => {
                 let _ = self.open_path(path);
@@ -646,16 +765,122 @@ impl NotepadAppState {
         }
     }
 
-    /// Loads a specific path into the editor (`LoadFile` at `0x140010F48`).
+    /// Executes `IDM_FILE_OPEN_FOLDER` (`File > Open Folder...` / `Ctrl+Shift+O` -> `prompt_open_folder` at `0x1400FD514`).
+    pub fn cmd_open_folder(&mut self) {
+        let mut dialog = rfd::FileDialog::new().set_title("Open Folder");
+        if let Some(ref current_root) = self.file_explorer.root_path {
+            dialog = dialog.set_directory(current_root);
+        } else if let Some(ref file_path) = self.current_file {
+            if let Some(parent) = file_path.parent() {
+                dialog = dialog.set_directory(parent);
+            }
+        }
+        if let Some(folder_path) = dialog.pick_folder() {
+            let _ = self.open_folder_path(folder_path);
+        }
+    }
+
+    /// Programmatically mounts a folder into `FileExplorer`, opens the left tree pane,
+    /// starts the filesystem watcher timer, and relayouts the `HSplit` viewport.
+    pub fn open_folder_path(&mut self, folder_path: PathBuf) -> Result<(), String> {
+        self.file_explorer.open_folder(folder_path)?;
+        if !self.hwnd_main.is_invalid() {
+            unsafe {
+                let _ = SetTimer(Some(self.hwnd_main), ID_WATCHER_TIMER, 500, None);
+            }
+        }
+        self.relayout_viewport();
+        self.update_window_title();
+        self.update_status_bar();
+        Ok(())
+    }
+
+    /// Toggles the left `FileExplorer` sidebar (`View > Toggle Side Bar` / `Ctrl+B`).
+    pub fn cmd_toggle_sidebar(&mut self) {
+        self.file_explorer.toggle_visibility();
+        self.relayout_viewport();
+        self.update_status_bar();
+    }
+
+    /// Switches to the tab at `index`.
+    pub fn cmd_switch_tab(&mut self, index: usize) {
+        if index >= self.tab_manager.tabs.len() {
+            return;
+        }
+        self.save_active_tab_state();
+        self.tab_manager.switch_to(index);
+        self.load_active_tab_state();
+    }
+
+    /// Switches to the next tab (`Ctrl+Tab` / `next_view_in_stack` at `0x14005BEF4`).
+    pub fn cmd_next_tab(&mut self) {
+        self.save_active_tab_state();
+        self.tab_manager.next_tab();
+        self.load_active_tab_state();
+    }
+
+    /// Switches to the previous tab (`Ctrl+Shift+Tab` / `prev_view_in_stack` at `0x14005BF0A`).
+    pub fn cmd_prev_tab(&mut self) {
+        self.save_active_tab_state();
+        self.tab_manager.prev_tab();
+        self.load_active_tab_state();
+    }
+
+    /// Closes the tab at `index`, prompting to save if dirty.
+    pub fn cmd_close_tab(&mut self, index: usize) {
+        if index >= self.tab_manager.tabs.len() {
+            return;
+        }
+        self.save_active_tab_state();
+        if self.tab_manager.tabs[index].is_dirty {
+            self.tab_manager.switch_to(index);
+            self.load_active_tab_state();
+            if !self.check_save() {
+                return;
+            }
+        }
+        self.tab_manager.close_tab(index);
+        self.load_active_tab_state();
+    }
+
+    /// Closes the currently active tab (`Ctrl+W` / `File > Close Tab`).
+    pub fn cmd_close_active_tab(&mut self) {
+        let active = self.tab_manager.active_index;
+        self.cmd_close_tab(active);
+    }
+
+    /// Loads a specific path into a pinned tab (`is_preview = false`).
     pub fn open_path(&mut self, path: PathBuf) -> Result<(), String> {
+        self.open_path_with_mode(path, false)
+    }
+
+    /// Loads a file path into the `TabManager` with either `is_preview = true` (single-click in sidebar)
+    /// or `is_preview = false` (double-click in sidebar / `File > Open...`).
+    pub fn open_path_with_mode(&mut self, path: PathBuf, is_preview: bool) -> Result<(), String> {
+        self.save_active_tab_state();
+
+        // If already open in a tab, switch to it (and pin if !is_preview) without re-reading disk if dirty
+        if let Some(existing_idx) = self.tab_manager.find_tab_by_path(&path) {
+            if !is_preview {
+                self.tab_manager.pin_tab(existing_idx);
+            }
+            self.tab_manager.switch_to(existing_idx);
+            self.load_active_tab_state();
+            return Ok(());
+        }
+
         match load_file_win32(&path) {
             Ok(doc) => {
-                set_edit_text(self.hwnd_edit, &doc.text);
-                self.current_file = Some(path);
-                self.encoding = doc.encoding;
+                self.tab_manager.open_file_in_tab(
+                    path.clone(),
+                    doc.text.clone(),
+                    doc.encoding,
+                    is_preview,
+                );
+                self.load_active_tab_state();
 
-                // 0x1400115C2: If document starts with ".LOG", append current timestamp at end
-                if doc.is_log_file {
+                // 0x1400115C2: If document starts with ".LOG" and is opened as a normal tab, append timestamp
+                if doc.is_log_file && !is_preview {
                     let end_len = doc.text.encode_utf16().count();
                     unsafe {
                         SendMessageW(
@@ -666,18 +891,9 @@ impl NotepadAppState {
                         );
                     }
                     self.insert_date_time(true);
+                    self.save_active_tab_state();
                 }
 
-                self.multi_cursor.set_text(get_edit_text(self.hwnd_edit));
-                if self.refresh_gutter_layout() {
-                    self.relayout_viewport();
-                } else {
-                    unsafe {
-                        self.render_gutter_direct();
-                    }
-                }
-                self.update_window_title();
-                self.update_status_bar();
                 Ok(())
             }
             Err(e) => {
@@ -720,10 +936,24 @@ impl NotepadAppState {
         let text = get_edit_text(self.hwnd_edit);
         match save_file_win32(&path, &text, self.encoding) {
             Ok(()) => {
-                self.current_file = Some(path);
+                self.current_file = Some(path.clone());
                 set_edit_modified(self.hwnd_edit, false);
+                let active = self.tab_manager.active_tab_mut();
+                active.path = Some(path.clone());
+                active.title = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("Untitled")
+                    .to_string();
+                active.is_dirty = false;
+                active.is_preview = false;
+                active.content = text;
+                self.file_explorer.refresh();
                 self.update_window_title();
                 self.update_status_bar();
+                unsafe {
+                    self.render_chrome_direct();
+                }
                 true
             }
             Err(e) => {
@@ -1003,9 +1233,8 @@ impl NotepadAppState {
         let _ = ReleaseDC(Some(self.hwnd_edit), hdc);
     }
 
-    /// Renders the left line-number gutter into `hdc` on `self.hwnd_main`, completely separated
-    /// from the main text-buffer rendering in `self.hwnd_edit` (modeled after Sublime Text's
-    /// gutter pass and `ColorScheme` offsets `[r12 + 0x46C..0x48C]`).
+    /// Renders the left line-number gutter into `hdc` on `self.hwnd_main`, positioned to the
+    /// right of `FileExplorer` (`x = sidebar_w..sidebar_w + gutter_w`) and below `TabBar` (`y = TAB_BAR_HEIGHT..main_h`).
     pub unsafe fn paint_gutter_hdc(&self, hdc: HDC) {
         if self.hwnd_main.is_invalid()
             || !self.line_numbers_visible
@@ -1017,31 +1246,38 @@ impl NotepadAppState {
 
         let mut rc = RECT::default();
         let _ = GetClientRect(self.hwnd_main, &mut rc);
+        let client_w = (rc.right - rc.left).max(0);
         let client_h = (rc.bottom - rc.top).max(0);
-        let edit_h = (client_h - self.active_status_height()).max(0);
-        let gutter_w = self.gutter_layout.total_width;
+        let main_h = (client_h - self.active_status_height()).max(0);
+        let sidebar_w = self.file_explorer.effective_width();
+        let right_w = (client_w - sidebar_w).max(0);
+        let (gutter_w, _, _) = self.gutter_layout.split_viewport(right_w);
+        let gutter_left = sidebar_w;
+        let gutter_right = sidebar_w + gutter_w;
+        let gutter_top = TAB_BAR_HEIGHT;
+        let edit_h = (main_h - gutter_top).max(0);
         if edit_h <= 0 || gutter_w <= 0 {
             return;
         }
 
-        // 1. Fill gutter background strip `[0, 0, gutter_w, edit_h]` with `theme.gutter` (`[r12 + 0x46C]`)
+        // 1. Fill gutter background strip `[gutter_left, gutter_top, gutter_right, main_h]` with `theme.gutter`
         let gutter_bg_brush = CreateSolidBrush(self.theme.gutter.to_colorref());
         let gutter_rect = RECT {
-            left: 0,
-            top: 0,
-            right: gutter_w,
-            bottom: edit_h,
+            left: gutter_left,
+            top: gutter_top,
+            right: gutter_right,
+            bottom: main_h,
         };
         let _ = FillRect(hdc, &gutter_rect, gutter_bg_brush);
         let _ = DeleteObject(HGDIOBJ(gutter_bg_brush.0));
 
-        // 2. Draw 1px vertical separator border at `x = gutter_w - 1` using `theme.selection_border` (`[r12 + 0x400]`)
+        // 2. Draw 1px vertical separator border at `x = gutter_right - 1` using `theme.selection_border`
         let border_brush = CreateSolidBrush(self.theme.selection_border.to_colorref());
         let border_rect = RECT {
-            left: (gutter_w - 1).max(0),
-            top: 0,
-            right: gutter_w,
-            bottom: edit_h,
+            left: (gutter_right - 1).max(gutter_left),
+            top: gutter_top,
+            right: gutter_right,
+            bottom: main_h,
         };
         let _ = FillRect(hdc, &border_rect, border_brush);
         let _ = DeleteObject(HGDIOBJ(border_brush.0));
@@ -1090,28 +1326,28 @@ impl NotepadAppState {
 
         // 6. Iterate through visible lines and draw right-aligned 1-based line numbers
         for line_idx in first_visible..total_lines {
-            let y = if let Some(range) = line_ranges.get(line_idx) {
+            let rel_y = if let Some(range) = line_ranges.get(line_idx) {
                 let (_, char_y) = self.char_byte_to_client_xy(range.start, line_height);
                 char_y
             } else {
                 ((line_idx.saturating_sub(first_visible)) as i32) * line_height
             };
+            let y = gutter_top + rel_y;
 
-            if y >= edit_h {
+            if y >= main_h {
                 break;
             }
-            if y + line_height <= 0 {
+            if y + line_height <= gutter_top {
                 continue;
             }
 
             let is_active = active_lines.contains(&line_idx);
             if is_active {
-                // Highlight active line's gutter cell (`highlight_gutter` `[rsi + 0x56B]`)
                 let row_rect = RECT {
-                    left: 0,
-                    top: y.max(0),
-                    right: (gutter_w - 1).max(0),
-                    bottom: (y + line_height).min(edit_h),
+                    left: gutter_left,
+                    top: y.max(gutter_top),
+                    right: (gutter_right - 1).max(gutter_left),
+                    bottom: (y + line_height).min(main_h),
                 };
                 let _ = FillRect(hdc, &row_rect, highlight_brush);
                 let _ = SetTextColor(hdc, self.theme.gutter_foreground_highlight.to_colorref());
@@ -1127,7 +1363,7 @@ impl NotepadAppState {
             let wide_num: Vec<u16> = formatted_num.encode_utf16().collect();
             let _ = TextOutW(
                 hdc,
-                self.gutter_layout.horizontal_margin,
+                gutter_left + self.gutter_layout.horizontal_margin,
                 y,
                 &wide_num,
             );
@@ -1139,16 +1375,44 @@ impl NotepadAppState {
         }
     }
 
-    /// Immediately repaints the left line-number gutter on `self.hwnd_main`.
-    pub unsafe fn render_gutter_direct(&self) {
-        if self.hwnd_main.is_invalid() || !self.line_numbers_visible {
+    /// Renders all custom GDI window chrome onto `hdc`:
+    /// 1. Left `FileExplorer` folder tree & resizable splitter (`[0..sidebar_w, 0..main_h]`)
+    /// 2. Top `TabManager` Tab Bar (`[sidebar_w..client_w, 0..TAB_BAR_HEIGHT]`)
+    /// 3. Editor Line-Number Gutter (`[sidebar_w..sidebar_w + gutter_w, TAB_BAR_HEIGHT..main_h]`)
+    pub unsafe fn paint_chrome_hdc(&self, hdc: HDC) {
+        if self.hwnd_main.is_invalid() || hdc.is_invalid() {
+            return;
+        }
+        let mut rc = RECT::default();
+        let _ = GetClientRect(self.hwnd_main, &mut rc);
+        let client_w = (rc.right - rc.left).max(0);
+        let client_h = (rc.bottom - rc.top).max(0);
+        let main_h = (client_h - self.active_status_height()).max(0);
+        let sidebar_w = self.file_explorer.effective_width();
+
+        if sidebar_w > 0 {
+            self.file_explorer.render_gdi(hdc, main_h, &self.theme);
+        }
+        self.tab_manager
+            .render_gdi(hdc, sidebar_w, client_w, &self.theme);
+        self.paint_gutter_hdc(hdc);
+    }
+
+    /// Immediately repaints the sidebar, tab bar, and line-number gutter on `self.hwnd_main`.
+    pub unsafe fn render_chrome_direct(&self) {
+        if self.hwnd_main.is_invalid() {
             return;
         }
         let hdc = GetDC(Some(self.hwnd_main));
         if !hdc.is_invalid() {
-            self.paint_gutter_hdc(hdc);
+            self.paint_chrome_hdc(hdc);
             let _ = ReleaseDC(Some(self.hwnd_main), hdc);
         }
+    }
+
+    /// Immediately repaints the left line-number gutter on `self.hwnd_main`.
+    pub unsafe fn render_gutter_direct(&self) {
+        self.render_chrome_direct();
     }
 
     /// Computes client-area `(x, y)` pixel coordinates for a UTF-8 byte offset in `hwnd_edit`.
@@ -1352,7 +1616,63 @@ pub unsafe extern "system" fn edit_subclass_proc(
         WM_KEYDOWN | WM_SYSKEYDOWN => {
             let vk = wparam.0 as u16;
 
-            // 0. Sublime Text Font Scaling Shortcuts (`Default (Windows).sublime-keymap` lines 772-780):
+            // 0a. Sublime Text Multi-Tab & Sidebar Shortcuts:
+            //     - `Ctrl+Tab` / `Ctrl+PageDown`       -> `next_view_in_stack` / `next_view`
+            //     - `Ctrl+Shift+Tab` / `Ctrl+PageUp`   -> `prev_view_in_stack` / `prev_view`
+            //     - `Ctrl+W`                           -> `close_file` (Close active tab)
+            //     - `Ctrl+N`                           -> `new_file` (New tab)
+            //     - `Ctrl+O`                           -> `prompt_open_file`
+            //     - `Ctrl+Shift+O`                     -> `prompt_open_folder` (File > Open Folder)
+            //     - `Ctrl+S` / `Ctrl+Shift+S`          -> `save` / `prompt_save_as`
+            //     - `Ctrl+B`                           -> `toggle_side_bar` (View > Toggle Side Bar)
+            if ctrl_down && !alt_down {
+                if vk == VK_TAB.0 {
+                    if shift_down {
+                        state.cmd_prev_tab();
+                    } else {
+                        state.cmd_next_tab();
+                    }
+                    return LRESULT(0);
+                }
+                if vk == VK_NEXT.0 && !shift_down {
+                    state.cmd_next_tab();
+                    return LRESULT(0);
+                }
+                if vk == VK_PRIOR.0 && !shift_down {
+                    state.cmd_prev_tab();
+                    return LRESULT(0);
+                }
+                if !shift_down && vk == b'W' as u16 {
+                    state.cmd_close_active_tab();
+                    return LRESULT(0);
+                }
+                if !shift_down && vk == b'N' as u16 {
+                    state.cmd_file_new();
+                    return LRESULT(0);
+                }
+                if vk == b'O' as u16 {
+                    if shift_down {
+                        state.cmd_open_folder();
+                    } else {
+                        state.cmd_file_open();
+                    }
+                    return LRESULT(0);
+                }
+                if vk == b'S' as u16 {
+                    if shift_down {
+                        let _ = state.cmd_file_save_as();
+                    } else {
+                        let _ = state.cmd_file_save();
+                    }
+                    return LRESULT(0);
+                }
+                if !shift_down && vk == b'B' as u16 {
+                    state.cmd_toggle_sidebar();
+                    return LRESULT(0);
+                }
+            }
+
+            // 0b. Sublime Text Font Scaling Shortcuts (`Default (Windows).sublime-keymap` lines 772-780):
             //    - `Ctrl++` / `Ctrl+=` / `Ctrl+NumpadPlus` -> `increase_font_size` (`0x1400FEBF6`)
             //    - `Ctrl+-` / `Ctrl+NumpadMinus`           -> `decrease_font_size` (`0x1400FECCA`)
             //    - `Ctrl+0` / `Ctrl+Numpad0`               -> `reset_font_size` (`0x1400FED9E`)
@@ -1501,8 +1821,10 @@ pub unsafe extern "system" fn edit_subclass_proc(
 
         WM_CHAR => {
             let ch_u32 = (wparam.0 & 0xFFFF) as u32;
-            // Suppress Ctrl+D control char (0x04 = EOT)
-            if ch_u32 == 0x04 {
+            // Suppress control characters for handled Ctrl+<Key> shortcuts (Ctrl+B=0x02, Ctrl+D=0x04, Ctrl+N=0x0E, Ctrl+O=0x0F, Ctrl+S=0x13, Ctrl+W=0x17, Tab with Ctrl)
+            if matches!(ch_u32, 0x02 | 0x04 | 0x0E | 0x0F | 0x13 | 0x17)
+                || (ctrl_down && ch_u32 == 0x09)
+            {
                 return LRESULT(0);
             }
 
@@ -1543,7 +1865,7 @@ pub fn register_notepad_class(hinstance: HINSTANCE) -> Result<u16, &'static str>
 
         let wcx = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32, // 0x50 at 0x14001E205
-            style: Default::default(),
+            style: CS_DBLCLKS,
             lpfnWndProc: Some(notepad_wnd_proc), // 0x14000E950 at 0x14001E278
             cbClsExtra: 0,
             cbWndExtra: 0,
@@ -1585,8 +1907,8 @@ pub fn create_notepad_window(
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            800,
-            600,
+            960,
+            640,
             None,
             Some(hmenu),
             Some(hinstance),
@@ -1602,7 +1924,7 @@ pub fn create_notepad_window(
     }
     let client_w = (rc.right - rc.left).max(0);
     let client_h = (rc.bottom - rc.top).max(0);
-    let edit_h = (client_h - STATUS_BAR_HEIGHT).max(0);
+    let edit_h = (client_h - STATUS_BAR_HEIGHT - TAB_BAR_HEIGHT).max(0);
 
     // 3. Create Child "Edit" Control (0x1400125E8)
     let initial_wrap = WordWrap::Disabled;
@@ -1611,7 +1933,7 @@ pub fn create_notepad_window(
     // 4. Create Child Status Bar (0x140013715)
     let status_class: Vec<u16> = "STATIC\0".encode_utf16().collect();
     let status_text: Vec<u16> =
-        "  Ln 1, Col 1   |   100%   |   Windows (CRLF)   |   UTF-8\0"
+        "  Ln 1, Col 1   |   Tab 1/1   |   100%   |   UTF-8\0"
             .encode_utf16()
             .collect();
     let hwnd_status = unsafe {
@@ -1621,7 +1943,7 @@ pub fn create_notepad_window(
             PCWSTR(status_text.as_ptr()),
             WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0),
             0,
-            edit_h,
+            client_h - STATUS_BAR_HEIGHT,
             client_w,
             STATUS_BAR_HEIGHT,
             Some(hwnd_main),
@@ -1659,7 +1981,7 @@ pub fn create_notepad_window(
         );
     }
 
-    // 5. Box application state with Sublime Mariana Dark theme & left line-number gutter enabled
+    // 5. Box application state with Sublime Mariana Dark theme, TabManager, FileExplorer, & gutter enabled
     let initial_preset = ThemePreset::MarianaDark;
     let initial_theme = Theme::from_preset(initial_preset);
     let (edit_bg_brush, status_bg_brush) = unsafe {
@@ -1680,6 +2002,8 @@ pub fn create_notepad_window(
         current_file: None,
         encoding: TextEncoding::Utf8,
         multi_cursor: MultiCursorEditor::new(),
+        tab_manager: TabManager::new(),
+        file_explorer: FileExplorer::new(),
         edit_prev_wndproc: 0,
         alt_drag_origin: None,
         internal_clipboard: None,
@@ -1710,6 +2034,82 @@ pub fn create_notepad_window(
     Ok(hwnd_main)
 }
 
+unsafe fn append_popup_item(menu: HMENU, id: u32, label: &str) {
+    let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+    let _ = AppendMenuW(menu, MF_STRING, id as usize, PCWSTR(wide.as_ptr()));
+}
+
+/// Shows the Sublime-style right-click context menu for a tab at `tab_index`.
+unsafe fn show_tab_context_menu(hwnd: HWND, state: &mut NotepadAppState, tab_index: usize) {
+    let Ok(menu) = CreatePopupMenu() else {
+        return;
+    };
+    state.tab_manager.context_menu_tab = Some(tab_index);
+    append_popup_item(menu, IDM_CTX_TAB_CLOSE, "Close Tab\tCtrl+W");
+    append_popup_item(menu, IDM_CTX_TAB_CLOSE_OTHERS, "Close Other Tabs");
+    append_popup_item(menu, IDM_CTX_TAB_CLOSE_RIGHT, "Close Tabs to the Right");
+    append_popup_item(menu, IDM_CTX_TAB_CLOSE_UNMODIFIED, "Close Unmodified Tabs");
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+    append_popup_item(menu, IDM_FILENEW, "New Tab\tCtrl+N");
+
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    let cmd = TrackPopupMenu(
+        menu,
+        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+        pt.x,
+        pt.y,
+        Some(0),
+        hwnd,
+        None,
+    );
+    let _ = DestroyMenu(menu);
+
+    if cmd.0 != 0 {
+        let _ = SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(cmd.0 as usize)),
+            Some(LPARAM(0)),
+        );
+    }
+}
+
+/// Shows the Sublime-style right-click context menu for the `FileExplorer` sidebar.
+unsafe fn show_sidebar_context_menu(hwnd: HWND, _state: &mut NotepadAppState) {
+    let Ok(menu) = CreatePopupMenu() else {
+        return;
+    };
+    append_popup_item(menu, IDM_CTX_SIDEBAR_OPEN, "Open File");
+    append_popup_item(menu, IDM_CTX_SIDEBAR_NEW_FILE, "New File in Folder");
+    append_popup_item(menu, IDM_CTX_SIDEBAR_COPY_PATH, "Copy Path");
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+    append_popup_item(menu, IDM_CTX_SIDEBAR_REFRESH, "Refresh Folder");
+    append_popup_item(menu, IDM_CTX_SIDEBAR_CLOSE_FOLDER, "Close Folder");
+
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    let cmd = TrackPopupMenu(
+        menu,
+        TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD,
+        pt.x,
+        pt.y,
+        Some(0),
+        hwnd,
+        None,
+    );
+    let _ = DestroyMenu(menu);
+
+    if cmd.0 != 0 {
+        let _ = SendMessageW(
+            hwnd,
+            WM_COMMAND,
+            Some(WPARAM(cmd.0 as usize)),
+            Some(LPARAM(0)),
+        );
+    }
+}
+
 /// Main Window Procedure (`NPWndProc` at `0x14000E950`).
 pub unsafe extern "system" fn notepad_wnd_proc(
     hwnd: HWND,
@@ -1723,7 +2123,6 @@ pub unsafe extern "system" fn notepad_wnd_proc(
         match msg {
             // 0x14000EA6E: WM_SIZE (0x0005) -> NPSize (0x14000E848)
             WM_SIZE => {
-                // wparam == 1 is SIZE_MINIMIZED (0x14000EA73: sub rdi, 1; je 0x14000ea96)
                 if wparam.0 != 1 {
                     let width = (lparam.0 & 0xFFFF) as i16 as i32;
                     let height = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
@@ -1740,12 +2139,305 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                 return LRESULT(0);
             }
 
-            // Sublime-inspired left line-number gutter rendering pass (WM_PAINT on main window)
+            // Poll `notify` filesystem watcher every 500ms for live sidebar tree refresh
+            WM_TIMER => {
+                if wparam.0 == ID_WATCHER_TIMER && state.file_explorer.poll_watcher() {
+                    state.render_chrome_direct();
+                }
+                return LRESULT(0);
+            }
+
+            // Update cursor to `IDC_SIZEWE` when hovering over the sidebar splitter, or `IDC_ARROW` on chrome
+            WM_SETCURSOR => {
+                let hit_hwnd = HWND(wparam.0 as *mut core::ffi::c_void);
+                let hit_code = (lparam.0 & 0xFFFF) as u16;
+                if hit_hwnd == hwnd && hit_code == 1 {
+                    let sidebar_w = state.file_explorer.effective_width();
+                    if state.file_explorer.is_resizing {
+                        if let Ok(cur) = LoadCursorW(None, IDC_SIZEWE) {
+                            let _ = SetCursor(Some(cur));
+                            return LRESULT(1);
+                        }
+                    } else if sidebar_w > 0 {
+                        if let Ok(cur) = LoadCursorW(None, IDC_ARROW) {
+                            let _ = SetCursor(Some(cur));
+                            return LRESULT(1);
+                        }
+                    }
+                }
+                return DefWindowProcW(hwnd, msg, wparam, lparam);
+            }
+
+            // Mouse click on Tab Bar or Left `FileExplorer` Sidebar
+            WM_LBUTTONDOWN => {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let client_w = (rc.right - rc.left).max(0);
+                let client_h = (rc.bottom - rc.top).max(0);
+                let main_h = (client_h - state.active_status_height()).max(0);
+                let sidebar_w = state.file_explorer.effective_width();
+
+                // 1. Check Sidebar & Splitter hit-test first
+                if let Some(target) = state.file_explorer.hit_test(x, y, main_h) {
+                    match target {
+                        SidebarHitTarget::Splitter => {
+                            state.file_explorer.is_resizing = true;
+                            let _ = SetCapture(hwnd);
+                            state.render_chrome_direct();
+                            return LRESULT(0);
+                        }
+                        SidebarHitTarget::Row(row_idx) => {
+                            if let Some(row) = state.file_explorer.flat_rows.get(row_idx).cloned() {
+                                if !row.is_empty_placeholder {
+                                    state.file_explorer.selected_path = Some(row.path.clone());
+                                    if row.is_dir {
+                                        state.file_explorer.toggle_expand(&row.path);
+                                        state.render_chrome_direct();
+                                    } else {
+                                        // Single-click file in tree -> opens in preview tab (`is_preview = true`)
+                                        let _ = state.open_path_with_mode(row.path, true);
+                                    }
+                                }
+                            }
+                            return LRESULT(0);
+                        }
+                        SidebarHitTarget::Header | SidebarHitTarget::EmptySpace => {
+                            return LRESULT(0);
+                        }
+                    }
+                }
+
+                // 2. Check Tab Bar hit-test
+                if let Some(target) = state.tab_manager.hit_test(x, y, sidebar_w, client_w) {
+                    match target {
+                        TabHitTarget::TabClose(idx) => {
+                            state.cmd_close_tab(idx);
+                        }
+                        TabHitTarget::TabBody(idx) => {
+                            state.cmd_switch_tab(idx);
+                            state.tab_manager.dragging_tab = Some(idx);
+                            state.tab_manager.drag_start_x = x;
+                            let _ = SetCapture(hwnd);
+                        }
+                        TabHitTarget::NewTabButton => {
+                            state.cmd_file_new();
+                        }
+                        TabHitTarget::EmptyBar => {}
+                    }
+                    return LRESULT(0);
+                }
+
+                return LRESULT(0);
+            }
+
+            // Double-click in Sidebar pins the file tab (`is_preview = false`); double-click in Tab Bar creates/pins tab
+            WM_LBUTTONDBLCLK => {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let client_w = (rc.right - rc.left).max(0);
+                let client_h = (rc.bottom - rc.top).max(0);
+                let main_h = (client_h - state.active_status_height()).max(0);
+                let sidebar_w = state.file_explorer.effective_width();
+
+                if let Some(SidebarHitTarget::Row(row_idx)) =
+                    state.file_explorer.hit_test(x, y, main_h)
+                {
+                    if let Some(row) = state.file_explorer.flat_rows.get(row_idx).cloned() {
+                        if !row.is_dir && !row.is_empty_placeholder {
+                            // Double-click file in tree -> opens/promotes as pinned tab (`is_preview = false`)
+                            let _ = state.open_path_with_mode(row.path, false);
+                        }
+                    }
+                    return LRESULT(0);
+                }
+
+                if let Some(target) = state.tab_manager.hit_test(x, y, sidebar_w, client_w) {
+                    match target {
+                        TabHitTarget::EmptyBar => state.cmd_file_new(),
+                        TabHitTarget::TabBody(idx) => {
+                            state.tab_manager.pin_tab(idx);
+                            state.render_chrome_direct();
+                        }
+                        _ => {}
+                    }
+                    return LRESULT(0);
+                }
+
+                return LRESULT(0);
+            }
+
+            // Middle-click on any tab closes that tab (`Default (Windows).sublime-mousemap`)
+            WM_MBUTTONDOWN => {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let client_w = (rc.right - rc.left).max(0);
+                let sidebar_w = state.file_explorer.effective_width();
+
+                if let Some(TabHitTarget::TabBody(idx) | TabHitTarget::TabClose(idx)) =
+                    state.tab_manager.hit_test(x, y, sidebar_w, client_w)
+                {
+                    state.cmd_close_tab(idx);
+                }
+                return LRESULT(0);
+            }
+
+            // Mouse move for splitter resizing, tab drag-to-reorder, and hover highlights
+            WM_MOUSEMOVE => {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let client_w = (rc.right - rc.left).max(0);
+                let client_h = (rc.bottom - rc.top).max(0);
+                let main_h = (client_h - state.active_status_height()).max(0);
+
+                // 1. Active splitter drag
+                if state.file_explorer.is_resizing {
+                    let max_w = (client_w - 180).max(140);
+                    state.file_explorer.width = x.clamp(140, max_w);
+                    state.resize_children(client_w, client_h);
+                    return LRESULT(0);
+                }
+
+                let sidebar_w = state.file_explorer.effective_width();
+
+                // 2. Active tab drag-to-reorder
+                if let Some(drag_idx) = state.tab_manager.dragging_tab {
+                    if (wparam.0 & MK_LBUTTON_MASK) != 0 {
+                        let (tab_rects, _) = state.tab_manager.compute_layout(sidebar_w, client_w);
+                        for r in &tab_rects {
+                            let mid = (r.left + r.right) / 2;
+                            if (r.index < drag_idx && x < mid && x >= r.left)
+                                || (r.index > drag_idx && x > mid && x < r.right)
+                            {
+                                if state.tab_manager.reorder_tab(drag_idx, r.index) {
+                                    state.tab_manager.dragging_tab = Some(r.index);
+                                    state.render_chrome_direct();
+                                    state.update_status_bar();
+                                }
+                                break;
+                            }
+                        }
+                    } else {
+                        state.tab_manager.dragging_tab = None;
+                    }
+                    return LRESULT(0);
+                }
+
+                // 3. Hover tracking on Sidebar & TabBar
+                let mut needs_repaint = false;
+                let new_hover_row = match state.file_explorer.hit_test(x, y, main_h) {
+                    Some(SidebarHitTarget::Splitter) => {
+                        if let Ok(cur) = LoadCursorW(None, IDC_SIZEWE) {
+                            let _ = SetCursor(Some(cur));
+                        }
+                        None
+                    }
+                    Some(SidebarHitTarget::Row(r)) => Some(r),
+                    _ => None,
+                };
+                if new_hover_row != state.file_explorer.hover_row {
+                    state.file_explorer.hover_row = new_hover_row;
+                    needs_repaint = true;
+                }
+
+                let (mut new_hover_tab, mut new_hover_close, mut new_hover_plus) =
+                    (None, None, false);
+                if let Some(hit) = state.tab_manager.hit_test(x, y, sidebar_w, client_w) {
+                    match hit {
+                        TabHitTarget::TabBody(i) => new_hover_tab = Some(i),
+                        TabHitTarget::TabClose(i) => {
+                            new_hover_tab = Some(i);
+                            new_hover_close = Some(i);
+                        }
+                        TabHitTarget::NewTabButton => new_hover_plus = true,
+                        TabHitTarget::EmptyBar => {}
+                    }
+                }
+                if new_hover_tab != state.tab_manager.hover_tab
+                    || new_hover_close != state.tab_manager.hover_close
+                    || new_hover_plus != state.tab_manager.hover_new_btn
+                {
+                    state.tab_manager.hover_tab = new_hover_tab;
+                    state.tab_manager.hover_close = new_hover_close;
+                    state.tab_manager.hover_new_btn = new_hover_plus;
+                    needs_repaint = true;
+                }
+
+                if needs_repaint {
+                    state.render_chrome_direct();
+                }
+                return LRESULT(0);
+            }
+
+            WM_LBUTTONUP => {
+                if state.file_explorer.is_resizing || state.tab_manager.dragging_tab.is_some() {
+                    state.file_explorer.is_resizing = false;
+                    state.tab_manager.dragging_tab = None;
+                    let _ = ReleaseCapture();
+                    state.render_chrome_direct();
+                }
+                return LRESULT(0);
+            }
+
+            // Right-click context menu on Tab Bar or Sidebar
+            WM_RBUTTONUP => {
+                let x = (lparam.0 & 0xFFFF) as i16 as i32;
+                let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+                let mut rc = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rc);
+                let client_w = (rc.right - rc.left).max(0);
+                let client_h = (rc.bottom - rc.top).max(0);
+                let main_h = (client_h - state.active_status_height()).max(0);
+                let sidebar_w = state.file_explorer.effective_width();
+
+                if let Some(hit) = state.file_explorer.hit_test(x, y, main_h) {
+                    if let SidebarHitTarget::Row(row_idx) = hit {
+                        if let Some(row) = state.file_explorer.flat_rows.get(row_idx) {
+                            if !row.is_empty_placeholder {
+                                state.file_explorer.selected_path = Some(row.path.clone());
+                                state.render_chrome_direct();
+                            }
+                        }
+                    }
+                    show_sidebar_context_menu(hwnd, state);
+                    return LRESULT(0);
+                }
+
+                if let Some(TabHitTarget::TabBody(idx) | TabHitTarget::TabClose(idx)) =
+                    state.tab_manager.hit_test(x, y, sidebar_w, client_w)
+                {
+                    show_tab_context_menu(hwnd, state, idx);
+                    return LRESULT(0);
+                }
+
+                return LRESULT(0);
+            }
+
+            // Scroll wheel over the left `FileExplorer` tree
+            WM_MOUSEWHEEL => {
+                let sidebar_w = state.file_explorer.effective_width();
+                if sidebar_w > 0 {
+                    let delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
+                    let step = if delta > 0 { -3 } else { 3 };
+                    state.file_explorer.scroll_by(step);
+                    state.render_chrome_direct();
+                    return LRESULT(0);
+                }
+            }
+
+            // Render Sidebar, Tab Bar, and Line-Number Gutter on `WM_PAINT`
             WM_PAINT => {
                 let mut ps = PAINTSTRUCT::default();
                 let hdc = BeginPaint(hwnd, &mut ps);
                 if !hdc.is_invalid() {
-                    state.paint_gutter_hdc(hdc);
+                    state.paint_chrome_hdc(hdc);
                 }
                 let _ = EndPaint(hwnd, &ps);
                 return LRESULT(0);
@@ -1802,6 +2494,8 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                 match cmd_id {
                     IDM_FILENEW => state.cmd_file_new(),
                     IDM_FILEOPEN => state.cmd_file_open(),
+                    IDM_FILE_OPEN_FOLDER => state.cmd_open_folder(),
+                    IDM_FILE_CLOSE_TAB => state.cmd_close_active_tab(),
                     IDM_FILESAVE => {
                         let _ = state.cmd_file_save();
                     }
@@ -1811,6 +2505,89 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                     IDM_FILEEXIT => {
                         // 0x14000DF4C: Post WM_CLOSE
                         let _ = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                    }
+                    ID_VIEW_TOGGLE_SIDEBAR => state.cmd_toggle_sidebar(),
+                    IDM_TAB_NEXT => state.cmd_next_tab(),
+                    IDM_TAB_PREV => state.cmd_prev_tab(),
+                    IDM_CTX_TAB_CLOSE => {
+                        let idx = state
+                            .tab_manager
+                            .context_menu_tab
+                            .unwrap_or(state.tab_manager.active_index);
+                        state.cmd_close_tab(idx);
+                    }
+                    IDM_CTX_TAB_CLOSE_OTHERS => {
+                        let idx = state
+                            .tab_manager
+                            .context_menu_tab
+                            .unwrap_or(state.tab_manager.active_index);
+                        state.save_active_tab_state();
+                        state.tab_manager.close_others(idx);
+                        state.load_active_tab_state();
+                    }
+                    IDM_CTX_TAB_CLOSE_RIGHT => {
+                        let idx = state
+                            .tab_manager
+                            .context_menu_tab
+                            .unwrap_or(state.tab_manager.active_index);
+                        state.save_active_tab_state();
+                        state.tab_manager.close_to_right(idx);
+                        state.load_active_tab_state();
+                    }
+                    IDM_CTX_TAB_CLOSE_UNMODIFIED => {
+                        state.save_active_tab_state();
+                        state.tab_manager.close_unmodified();
+                        state.load_active_tab_state();
+                    }
+                    IDM_CTX_SIDEBAR_OPEN => {
+                        if let Some(path) = state.file_explorer.selected_path.clone() {
+                            if path.is_file() {
+                                let _ = state.open_path_with_mode(path, false);
+                            } else if path.is_dir() {
+                                state.file_explorer.toggle_expand(&path);
+                                state.render_chrome_direct();
+                            }
+                        }
+                    }
+                    IDM_CTX_SIDEBAR_NEW_FILE => {
+                        let base_dir = state
+                            .file_explorer
+                            .selected_path
+                            .as_ref()
+                            .and_then(|p| {
+                                if p.is_dir() {
+                                    Some(p.clone())
+                                } else {
+                                    p.parent().map(|par| par.to_path_buf())
+                                }
+                            })
+                            .or_else(|| state.file_explorer.root_path.clone());
+                        if let Some(dir) = base_dir {
+                            let mut candidate = dir.join("untitled.txt");
+                            let mut n = 1usize;
+                            while candidate.exists() {
+                                candidate = dir.join(format!("untitled_{}.txt", n));
+                                n += 1;
+                            }
+                            if std::fs::write(&candidate, "").is_ok() {
+                                state.file_explorer.refresh();
+                                let _ = state.open_path_with_mode(candidate, false);
+                            }
+                        }
+                    }
+                    IDM_CTX_SIDEBAR_COPY_PATH => {
+                        if let Some(ref path) = state.file_explorer.selected_path {
+                            state.internal_clipboard = Some(path.to_string_lossy().to_string());
+                        }
+                    }
+                    IDM_CTX_SIDEBAR_REFRESH => {
+                        state.file_explorer.refresh();
+                        state.render_chrome_direct();
+                    }
+                    IDM_CTX_SIDEBAR_CLOSE_FOLDER => {
+                        state.file_explorer.close_folder();
+                        state.relayout_viewport();
+                        state.update_status_bar();
                     }
                     ID_EDIT_UNDO => {
                         if state.multi_cursor.can_undo() {

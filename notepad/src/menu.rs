@@ -65,6 +65,8 @@ pub const IDM_FILENEW: u32 = 0x01;
 pub const IDM_FILEOPEN: u32 = 0x02;
 pub const IDM_FILESAVE: u32 = 0x03;
 pub const IDM_FILESAVEAS: u32 = 0x04;
+pub const IDM_FILE_OPEN_FOLDER: u32 = 0x05;
+pub const IDM_FILE_CLOSE_TAB: u32 = 0x06;
 pub const IDM_FILEEXIT: u32 = 0x07;
 
 // Notepad Edit Menu Command IDs
@@ -91,7 +93,23 @@ pub const ID_EDIT_SINGLE_CURSOR: u32 = 0x54;
 // Notepad View & Help Command IDs
 pub const ID_VIEW_STATUS: u32 = 0x1B;
 pub const ID_VIEW_LINE_NUMBERS: u32 = 0x60;
+pub const ID_VIEW_TOGGLE_SIDEBAR: u32 = 0x65;
+pub const IDM_TAB_NEXT: u32 = 0x66;
+pub const IDM_TAB_PREV: u32 = 0x67;
 pub const IDM_HELP_ABOUT: u32 = 0x41;
+
+// Sublime-inspired Tab Context Menu Command IDs (`Tab Context.sublime-menu`)
+pub const IDM_CTX_TAB_CLOSE: u32 = 0x80;
+pub const IDM_CTX_TAB_CLOSE_OTHERS: u32 = 0x81;
+pub const IDM_CTX_TAB_CLOSE_RIGHT: u32 = 0x82;
+pub const IDM_CTX_TAB_CLOSE_UNMODIFIED: u32 = 0x83;
+
+// Sublime-inspired Sidebar Context Menu Command IDs (`Side Bar.sublime-menu`)
+pub const IDM_CTX_SIDEBAR_OPEN: u32 = 0x88;
+pub const IDM_CTX_SIDEBAR_NEW_FILE: u32 = 0x89;
+pub const IDM_CTX_SIDEBAR_COPY_PATH: u32 = 0x8A;
+pub const IDM_CTX_SIDEBAR_REFRESH: u32 = 0x8B;
+pub const IDM_CTX_SIDEBAR_CLOSE_FOLDER: u32 = 0x8C;
 
 // Sublime-inspired Color Scheme Theme Command IDs (Format & Preferences Menus)
 pub const ID_FORMAT_THEME_MARIANA: u32 = 0x61;
@@ -115,6 +133,7 @@ pub struct EditorState {
     pub word_wrap: WordWrap,
     pub status_bar_visible: bool,
     pub line_numbers_visible: bool,
+    pub sidebar_visible: bool,
     pub theme_preset: ThemePreset,
     pub show_full_path: bool,
 }
@@ -136,12 +155,25 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
         let file_menu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (File) failed")?;
         append_menu_str(file_menu, MF_STRING, IDM_FILENEW as usize, "&New\tCtrl+N");
         append_menu_str(file_menu, MF_STRING, IDM_FILEOPEN as usize, "&Open...\tCtrl+O");
+        append_menu_str(
+            file_menu,
+            MF_STRING,
+            IDM_FILE_OPEN_FOLDER as usize,
+            "Open &Folder...\tCtrl+Shift+O",
+        );
         append_menu_str(file_menu, MF_STRING, IDM_FILESAVE as usize, "&Save\tCtrl+S");
         append_menu_str(
             file_menu,
             MF_STRING,
             IDM_FILESAVEAS as usize,
             "Save &As...\tCtrl+Shift+S",
+        );
+        let _ = AppendMenuW(file_menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_menu_str(
+            file_menu,
+            MF_STRING,
+            IDM_FILE_CLOSE_TAB as usize,
+            "&Close Tab\tCtrl+W",
         );
         let _ = AppendMenuW(file_menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_menu_str(file_menu, MF_STRING, IDM_FILEEXIT as usize, "E&xit");
@@ -259,12 +291,32 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
 
         // Submenu 3: View
         let view_menu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (View) failed")?;
+        append_menu_str(
+            view_menu,
+            MF_STRING,
+            ID_VIEW_TOGGLE_SIDEBAR as usize,
+            "Toggle &Side Bar\tCtrl+B",
+        );
+        let _ = AppendMenuW(view_menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_menu_str(view_menu, MF_STRING, ID_VIEW_STATUS as usize, "&Status Bar");
         append_menu_str(
             view_menu,
             MF_STRING,
             ID_VIEW_LINE_NUMBERS as usize,
             "&Line Numbers (Gutter)",
+        );
+        let _ = AppendMenuW(view_menu, MF_SEPARATOR, 0, PCWSTR::null());
+        append_menu_str(
+            view_menu,
+            MF_STRING,
+            IDM_TAB_NEXT as usize,
+            "&Next Tab\tCtrl+Tab",
+        );
+        append_menu_str(
+            view_menu,
+            MF_STRING,
+            IDM_TAB_PREV as usize,
+            "&Previous Tab\tCtrl+Shift+Tab",
         );
         append_menu_str(menu_bar, MF_POPUP, view_menu.0 as usize, "&View");
 
@@ -449,6 +501,13 @@ pub fn init_menu(
                 MF_UNCHECKED
             } | MF_BYCOMMAND;
             CheckMenuItem(view_menu, ID_VIEW_LINE_NUMBERS, gutter_check.0);
+
+            let sidebar_check = if state.sidebar_visible {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            } | MF_BYCOMMAND;
+            CheckMenuItem(view_menu, ID_VIEW_TOGGLE_SIDEBAR, sidebar_check.0);
         }
 
         // 8. Preferences Menu: CheckMenuItem for Show Full Path in Title Bar
