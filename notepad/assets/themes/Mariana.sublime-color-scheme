@@ -1,0 +1,74 @@
+{
+    "name": "Mariana (Original Rust Notepad)",
+    "author": "Rust Notepad Team",
+    "variables": {
+        "navy_bg": "#2B333C",
+        "snow_fg": "#DCE3EC",
+        "amber_caret": "#F6A64C",
+        "teal_accent": "#58B8B8",
+        "slate_sel": "#485460",
+        "slate_border": "#607080",
+        "row_tint": "#36404B",
+        "muted_gray": "#7E8C9C",
+        "coral_red": "#EE6A70",
+        "mint_green": "#92C890",
+        "gold_yellow": "#F2C464",
+        "sky_blue": "#689CD2",
+        "plum_purple": "#C694C8"
+    },
+    "globals": {
+        "background": "var(navy_bg)",
+        "foreground": "var(snow_fg)",
+        "caret": "var(amber_caret)",
+        "secondary_caret": "var(teal_accent)",
+        "line_highlight": "var(row_tint)",
+        "selection": "var(slate_sel)",
+        "selection_border": "var(slate_border)",
+        "gutter": "var(navy_bg)",
+        "gutter_foreground": "var(muted_gray)",
+        "gutter_foreground_highlight": "var(snow_fg)",
+        "brackets_foreground": "var(amber_caret)",
+        "status_background": "#212830",
+        "status_foreground": "#A4B2C2"
+    },
+    "rules": [
+        {
+            "name": "Comments",
+            "scope": "comment, comment.line, comment.block, punctuation.definition.comment",
+            "foreground": "var(muted_gray)",
+            "font_style": "italic"
+        },
+        {
+            "name": "Keywords",
+            "scope": "keyword, keyword.control, keyword.operator",
+            "foreground": "var(coral_red)",
+            "font_style": "bold"
+        },
+        {
+            "name": "Storage Types",
+            "scope": "storage, storage.type, storage.modifier",
+            "foreground": "var(plum_purple)",
+            "font_style": "italic"
+        },
+        {
+            "name": "Strings",
+            "scope": "string, string.quoted, string.quoted.double, string.quoted.single, string.quoted.triple",
+            "foreground": "var(mint_green)"
+        },
+        {
+            "name": "Constants & Numbers",
+            "scope": "constant, constant.numeric, constant.language, constant.character.escape",
+            "foreground": "var(amber_caret)"
+        },
+        {
+            "name": "Functions & Macros",
+            "scope": "entity.name.function, support.function",
+            "foreground": "var(sky_blue)"
+        },
+        {
+            "name": "Annotations & Decorators",
+            "scope": "meta.annotation, entity.name.function.decorator",
+            "foreground": "var(gold_yellow)"
+        }
+    ]
+}

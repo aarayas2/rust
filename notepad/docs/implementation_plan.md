@@ -1,221 +1,147 @@
-# Implementation Plan: Sublime Text Multi-Tab & Open Folder Upgrade
+# Implementation Plan: Incremental Syntax Highlighting, Syntax Registry & Color Themes
 
-## 1. Audit of Destination Codebase (`D:\github\rust\notepad`)
+## 1. Proposed Crate Stack (`Cargo.toml`)
 
-### 1.1 GUI Framework & Rendering Stack
-- **Crate:** `notepad_win32` (`Cargo.toml`, Rust 2021 edition).
-- **GUI Backend:** Native Win32 API via `windows = "0.62"` (`Win32_UI_WindowsAndMessaging`, `Win32_Graphics_Gdi`, `Win32_UI_Controls`, `Win32_UI_Input_KeyboardAndMouse`, `Win32_UI_Com_Dialogs`, `Win32_System_DataExchange`, etc.).
-- **Window Architecture (`src/window.rs`):**
-  - `hwnd_main`: Top-level `NotepadWin32Class` window hosting the menu bar, custom GDI line-number gutter, and child controls.
-  - `hwnd_edit`: Subclassed Win32 `"Edit"` control (`ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL`) with custom GDI overlay rendering for multi-cursor carets and rectangular block selection (`MultiCursorEditor`).
-  - `hwnd_status`: Win32 `"STATIC"` control at the bottom edge displaying line/column, cursor count, zoom %, encoding, and theme name.
-
-### 1.2 Current Application State (`NotepadAppState` in `src/window.rs`)
-Currently, `NotepadAppState` is strictly **single-document**:
-- `current_file: Option<PathBuf>`
-- `encoding: TextEncoding`
-- `multi_cursor: MultiCursorEditor`
-- Text buffer resides solely inside `hwnd_edit` (`get_edit_text()` / `set_edit_text()`) with a single Win32 `EM_GETMODIFY` / `EM_SETMODIFY` flag (`is_edit_modified()` / `set_edit_modified()`).
-- `resize_children(width, height)` positions only `[Gutter | hwnd_edit]` above `hwnd_status`.
-
----
-
-## 2. Gap Analysis (DST vs. Sublime Text REA Specification)
-
-| Capability | Sublime Text (`SRC`) | Current Notepad (`DST`) | Required Upgrade |
-| :--- | :--- | :--- | :--- |
-| **Document Model** | Multi-buffer (`SheetGroup` + `Sheet`/`View` list, MRU stack) | Single buffer in `hwnd_edit`, single `current_file: Option<PathBuf>` | Introduce `Tab` & `TabManager` (`src/tabs.rs`) syncing active buffer with `hwnd_edit` |
-| **Tab Bar UI** | `tabset_control` (`32px` height), `tab_control` with active indicator, italic preview label, dirty `*`/`•`, `×` close button, `+` new tab button | None | Custom double-buffered GDI Tab Bar at top of editor pane (`y = 0..32`) |
-| **Tab Interactions** | Click to switch, `×` / middle-click / `Ctrl+W` to close, drag-to-reorder, right-click menu (`Close Others`, `Close to Right`, `Close Unmodified`), `Ctrl+Tab` / `Ctrl+Shift+Tab` | None | Mouse hit-testing, drag-reorder tracking, Win32 popup context menu, keyboard accelerators |
-| **File > Open Folder** | `prompt_open_folder` native folder picker -> opens left `sidebar_container` + `sidebar_tree` (`250px` resizable splitter) | Only `File > Open...` (single file) | Add `File > Open Folder...` (`Ctrl+Shift+O`) via `rfd` + programmatic folder loader |
-| **Side Bar Tree View** | `FOLDERS` header, expand/collapse directories (`▸`/`▾`), folder/file icons, single-click = preview tab, double-click = pinned tab, edit = auto-pin | None | Introduce `FileExplorer` & `FileNode` (`src/file_explorer.rs`) with GDI tree renderer & splitter |
-| **File Watcher & Sidebar Toggle** | `ReadDirectoryChangesW` live tree refresh, `View > Toggle Side Bar` (`Ctrl+K, Ctrl+B`), exclude patterns | None | Add `notify` file watcher polled on Win32 timer + `View > Toggle Side Bar` menu/shortcut |
-
----
-
-## 3. Technical Design
-
-### 3.1 Crate Additions (`Cargo.toml`)
-Add the following dependencies to `Cargo.toml`:
-- `walkdir = "2"` — Fast directory traversal with entry filtering for `FileExplorer`.
-- `notify = "6"` — Cross-platform file system watcher (uses `ReadDirectoryChangesW` on Windows) for automatic sidebar tree refresh.
-- `rfd = "0.15"` — Native Windows `IFileOpenDialog` (`FOS_PICKFOLDERS`) folder picker for `File > Open Folder...`.
-
-### 3.2 Multi-Tab Data Structures (`src/tabs.rs`)
-
-```rust
-use std::path::PathBuf;
-use crate::file_io::TextEncoding;
-use crate::window::MultiCursorEditor;
-
-#[derive(Debug, Clone)]
-pub struct Tab {
-    pub id: u64,
-    pub path: Option<PathBuf>,
-    pub title: String,
-    pub content: String,
-    pub encoding: TextEncoding,
-    pub is_dirty: bool,
-    pub is_preview: bool,
-    pub cursor_pos: (usize, usize),
-    pub scroll_line: i32,
-    pub multi_cursor: MultiCursorEditor,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TabHitTarget {
-    TabBody(usize),
-    TabClose(usize),
-    NewTabButton,
-    EmptyBar,
-}
-
-#[derive(Debug, Clone)]
-pub struct TabRect {
-    pub index: usize,
-    pub left: i32,
-    pub top: i32,
-    pub right: i32,
-    pub bottom: i32,
-    pub close_left: i32,
-    pub close_top: i32,
-    pub close_right: i32,
-    pub close_bottom: i32,
-}
-
-pub struct TabManager {
-    pub tabs: Vec<Tab>,
-    pub active_index: usize,
-    pub mru_stack: Vec<u64>,
-    pub next_id: u64,
-    pub hover_tab: Option<usize>,
-    pub hover_close: Option<usize>,
-    pub hover_new_btn: bool,
-    pub dragging_tab: Option<usize>,
-    pub drag_start_x: i32,
-}
-```
-
-#### Key `TabManager` Operations
-- `new_tab(&mut self) -> usize`: Inserts a new untitled pinned tab right after `active_index` (matching Sublime's `open_tabs_after_current = true`), activates it, and records its ID in `mru_stack`.
-- `open_file_in_tab(&mut self, path: PathBuf, content: String, encoding: TextEncoding, preview: bool) -> (usize, bool)`:
-  - If `path` is already open in `tabs`, switches to that tab; if `preview == false`, also promotes `is_preview = false`.
-  - If `preview == true`, looks for an existing unmodified preview tab (`t.is_preview && !t.is_dirty`); if found, replaces it in-place and activates it.
-  - Otherwise, creates a new `Tab` with `is_preview = preview` after `active_index` and activates it.
-- `pin_tab(&mut self, index: usize)`: Sets `tabs[index].is_preview = false`.
-- `mark_active_dirty(&mut self, dirty: bool)`: Sets `is_dirty = dirty` on the active tab; if `dirty == true`, automatically pins the tab (`is_preview = false`) and updates untitled tab title from first line if applicable.
-- `close_tab(&mut self, index: usize) -> bool`: Removes tab at `index`. If `tabs` becomes empty, creates a fresh untitled tab so `tabs.len() >= 1` always holds. Adjusts `active_index` seamlessly.
-- `close_others(&mut self, keep_index: usize)` / `close_to_right(&mut self, from_index: usize)` / `close_unmodified(&mut self)`: Batch tab close operations matching `Tab Context.sublime-menu`.
-- `reorder_tab(&mut self, from: usize, to: usize)`: Moves tab from `from` to `to` during horizontal drag and keeps `active_index = to`.
-- `next_tab(&mut self)` / `prev_tab(&mut self)`: Cycles `(active_index + 1) % len` and `(active_index + len - 1) % len` (`Ctrl+Tab` / `Ctrl+Shift+Tab`).
-
-### 3.3 Open Folder & Left Pane Tree Data Structures (`src/file_explorer.rs`)
-
-```rust
-use std::collections::HashSet;
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::Receiver;
-use notify::{RecommendedWatcher, Event};
-
-#[derive(Debug, Clone)]
-pub enum FileNode {
-    File {
-        name: String,
-        path: PathBuf,
-    },
-    Dir {
-        name: String,
-        path: PathBuf,
-        children: Vec<FileNode>,
-        is_loaded: bool,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct FlatTreeRow {
-    pub path: PathBuf,
-    pub name: String,
-    pub depth: usize,
-    pub is_dir: bool,
-    pub is_expanded: bool,
-    pub is_empty_dir: bool,
-}
-
-pub struct FileExplorer {
-    pub root_path: Option<PathBuf>,
-    pub root_node: Option<FileNode>,
-    pub is_visible: bool,
-    pub expanded_paths: HashSet<PathBuf>,
-    pub flat_rows: Vec<FlatTreeRow>,
-    pub selected_path: Option<PathBuf>,
-    pub hover_row: Option<usize>,
-    pub width: i32,
-    pub is_resizing: bool,
-    pub scroll_y: i32,
-    pub row_height: i32,
-    pub header_height: i32,
-    watcher: Option<RecommendedWatcher>,
-    watch_rx: Option<Receiver<notify::Result<Event>>>,
-}
-```
-
-#### Key `FileExplorer` Operations
-- `open_folder(&mut self, path: PathBuf) -> Result<(), String>`:
-  - Canonicalizes/normalizes `path`, sets `root_path = Some(path.clone())`, `is_visible = true`, inserts `path` into `expanded_paths`, loads directory tree via `walkdir` (filtering excluded directories like `.git`, `target`, `node_modules` and sorting directories before files), rebuilds `flat_rows`, and starts a `notify::RecommendedWatcher` on `path`.
-- `toggle_expand(&mut self, path: &Path)`:
-  - Toggles `path` in `expanded_paths`, lazily loads children if `Dir { is_loaded: false }`, and rebuilds `flat_rows`.
-- `refresh(&mut self)`:
-  - Re-scans `root_path` while preserving `expanded_paths`, `selected_path`, and `scroll_y`.
-- `poll_watcher(&mut self) -> bool`:
-  - Drains `watch_rx`; if any filesystem events arrived, calls `refresh()` and returns `true` so the window invalidates and repaints the sidebar.
-
-### 3.4 Viewport Layout (`HSplit` + `VBox`)
-
-```
-+-----------------------------------------------------------------------+
-| Menu Bar (File | Edit | Format | View | Help)                         |
-+----------------------+------------------------------------------------+
-| FOLDERS        (28px)| [Tab 1 * x] [preview.rs x] [+]     (TabBar 32px)|
-| v project_root       +------+-----------------------------------------+
-|   > src              |    1 | fn main() {                             |
-|     Cargo.toml       |    2 |     println!("Hello");                  |
-|     README.md        |    3 | }                                       |
-|                      |      |                                         |
-|  FileExplorer        |Gutter| Editor (hwnd_edit)                      |
-|  (250px resizable)   |(48px)|                                         |
-|                      |      |                                         |
-+----------------------+------+-----------------------------------------+
-| Ln 1, Col 1 | 2 Tabs | Folder: project_root | 100% | UTF-8 | Dark     |
-+-----------------------------------------------------------------------+
-```
-
-- **Horizontal Split (`HSplit`):**
-  - When `file_explorer.is_visible && file_explorer.root_path.is_some()`:
-    - Left Pane (`FileExplorer`): `x = 0 .. sidebar_w` (default `250px`, clamped `140px .. client_w - 200px`).
-    - Splitter Hit Zone: `x = sidebar_w - 3 .. sidebar_w + 3` (`IDC_SIZEWE` cursor).
-    - Right Pane (`VBox [TabBar + Editor]`): starts at `right_x = sidebar_w`.
-  - When sidebar is hidden (`!file_explorer.is_visible`):
-    - `right_x = 0`, `sidebar_w = 0`.
-- **Vertical Split inside Right Pane (`VBox`):**
-  - `TabBar`: `x = right_x .. client_w`, `y = 0 .. TAB_BAR_HEIGHT (32px)`.
-  - `Gutter`: `x = right_x .. right_x + gutter_w`, `y = TAB_BAR_HEIGHT .. client_h - status_h`.
-  - `hwnd_edit`: `x = right_x + gutter_w .. client_w`, `y = TAB_BAR_HEIGHT .. client_h - status_h`.
-- **Bottom Status Bar:**
-  - `hwnd_status`: `x = 0 .. client_w`, `y = client_h - status_h .. client_h`.
-
----
-
-## 4. Files to Create or Modify
-
-| File Path | Action | Responsibility |
+| Crate | Version | Purpose |
 | :--- | :--- | :--- |
-| `docs/rea_sublime.md` | **Create** | Phase 1 REA behavioral and binary trace of `sublime_text.exe` |
-| `docs/implementation_plan.md` | **Create** | Phase 2 architecture audit, gap analysis, and implementation design |
-| `Cargo.toml` | **Modify** | Add `walkdir`, `notify`, `rfd`, and `Win32_UI_Shell` / `Win32_System_Com` features |
-| `src/lib.rs` | **Modify** | Export new `pub mod tabs;` and `pub mod file_explorer;` modules |
-| `src/tabs.rs` | **Create** | `Tab`, `TabManager`, tab bar layout calculation, hit-testing, GDI rendering, MRU/reorder/close logic, unit tests |
-| `src/file_explorer.rs` | **Create** | `FileNode`, `FileExplorer`, `walkdir` tree loader with exclude rules, `notify` watcher, GDI sidebar renderer, hit-testing, unit tests |
-| `src/menu.rs` | **Modify** | Add menu IDs and items: `IDM_FILE_OPEN_FOLDER`, `IDM_FILE_CLOSE_TAB`, `IDM_TAB_NEXT`, `IDM_TAB_PREV`, `IDM_VIEW_TOGGLE_SIDEBAR`, plus context menu IDs for tabs and sidebar |
-| `src/theme.rs` | **Modify** | Add theme colors for Tab Bar (bg, active tab, inactive tab, hover tab, tab border, accent line, dirty dot) and Sidebar (bg, header, selected row, hover row, splitter) |
-| `src/window.rs` | **Modify** | Integrate `TabManager` and `FileExplorer` into `NotepadAppState`; update `resize_children` for `HSplit`/`VBox`; wire GDI painting, mouse events (click, double-click, middle-click, drag-reorder, splitter drag, right-click context menus, scroll wheel), keyboard shortcuts (`Ctrl+W`, `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+Shift+O`, `Ctrl+B`), and watcher timer |
-| `src/main.rs` | **Modify** | Support opening a folder or file path from CLI arguments; extend `--self-test` to verify multi-tab creation, switching, reordering, closing, `Open Folder`, tree single-click preview vs double-click pin, dirty `*` indicator, and `Ctrl+Tab` |
+| `syntect` | `"5"` | Sublime Text `.sublime-syntax` YAML compilation, `ParseState` + `ScopeStack` incremental lexing |
+| `tree-sitter` | `"0.24"` | Incremental AST parser runtime (fallback / structural validation engine) |
+| `tree-sitter-highlight` | `"0.24"` | Tree-sitter highlight query runner fallback |
+| `ropey` | `"1"` | `Rope` text buffer for `O(log N)` line indexing and slicing on 10,000+ line documents |
+| `serde` | `{ version = "1", features = ["derive"] }` | Structured deserialization for `.sublime-color-scheme`, `.tmTheme`, and `.sublime-syntax` metadata |
+| `serde_json` | `"1"` | `.sublime-color-scheme` JSON parser with `variables` (`var(...)`) resolution |
+| `serde_yaml` | `"0.9"` | `.sublime-syntax` YAML header & metadata inspection |
+| `plist` | `"1"` | `.tmTheme` XML Property List parser |
+| `once_cell` | `"1"` | Lazy static initialization of global default `SyntaxRegistry` and `ThemeRegistry` |
+
+---
+
+## 2. Module Architecture
+
+```
+D:\github\rust\notepad\
+├── assets\
+│   ├── syntaxes\
+│   │   ├── Rust.sublime-syntax
+│   │   ├── JavaScript.sublime-syntax
+│   │   └── Python.sublime-syntax
+│   └── themes\
+│       ├── Monokai.tmTheme
+│       └── Mariana.sublime-color-scheme
+├── test_files\
+│   ├── sample.rs
+│   ├── sample.js
+│   └── sample.py
+└── src\
+    ├── highlight\
+    │   ├── mod.rs          # Highlighter trait, IncrementalHighlightCache, BracketMatcher, Rope buffer sync
+    │   ├── tokenizer.rs    # SyntectTokenizer (wraps syntect ParseState/ScopeStack) + TreeSitterFallback
+    │   └── registry.rs     # SyntaxDefinition trait, CustomSyntaxEntry, SyntaxRegistry (assets/syntaxes/ + detection)
+    └── theme\
+        ├── mod.rs          # Theme, Style, ColorScheme, ScopeRule, RgbColor, ThemePreset, GutterLayout
+        ├── loader.rs       # .tmTheme (plist) & .sublime-color-scheme (serde_json) parsers + var() resolver
+        └── manager.rs      # ThemeRegistry (loads assets/themes/ + built-in themes + live switching)
+```
+
+---
+
+## 3. Detailed Component Design
+
+### 3.1 `src/highlight/registry.rs` — Syntax Definitions & File Detection
+
+```rust
+use std::path::Path;
+use syntect::parsing::SyntaxReference;
+
+/// Trait representing a language syntax definition in the registry.
+pub trait SyntaxDefinition: Send + Sync {
+    /// Human-readable syntax name (e.g., `"Rust"`, `"JavaScript"`, `"Python"`).
+    fn name(&self) -> &str;
+    /// File extensions associated with this syntax (e.g., `["rs"]`, `["js", "mjs"]`).
+    fn file_extensions(&self) -> &[String];
+    /// Root TextMate/Sublime scope (e.g., `"source.rust"`, `"source.js"`, `"source.python"`).
+    fn scope(&self) -> &str;
+    /// Optional first-line regex pattern for shebang / header detection.
+    fn first_line_match(&self) -> Option<&str>;
+    /// Loader/origin identifier (`"assets/syntaxes/..."` or `"builtin"`).
+    fn loader(&self) -> &str;
+}
+```
+
+- **`SyntaxRegistry`:**
+  - Scans `D:\github\rust\notepad\assets\syntaxes\*.sublime-syntax` (and relative `assets/syntaxes`), compiling them into a `syntect::parsing::SyntaxSetBuilder` alongside built-in defaults.
+  - Implements:
+    - `detect_syntax(path: Option<&Path>, first_line: &str) -> & dyn SyntaxDefinition`:
+      1. Matches `path.extension()` case-insensitively against `file_extensions()`.
+      2. Evaluates `first_line` against `first_line_match` patterns (e.g. `#!/usr/bin/env python`, `#!/usr/bin/env node`, `#!/usr/bin/env rust-script`).
+      3. Falls back to `"Plain Text"` (`text.plain`).
+    - `find_by_name(name: &str)` and `find_by_scope(scope: &str)`.
+
+### 3.2 `src/highlight/tokenizer.rs` & `src/highlight/mod.rs` — Incremental Highlighting & Rope Cache
+
+```rust
+use ropey::Rope;
+use std::ops::Range;
+
+/// A single styled token span within a line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HighlightToken {
+    /// Byte range relative to the start of the line.
+    pub range: Range<usize>,
+    /// Resolved dot-separated scope string (e.g., `"keyword.control.rust"`, `"comment.line.double-slash.rust"`).
+    pub scope: String,
+}
+
+/// Trait for line-by-line incremental syntax highlighters.
+pub trait Highlighter {
+    /// Ensures lines `0..=end_line` have up-to-date token spans for `rope`, using cached line checkpoints.
+    fn highlight_range(&mut self, rope: &Rope, start_line: usize, end_line: usize) -> &[Vec<HighlightToken>];
+    /// Invalidates cached parser states starting from `from_line`.
+    fn invalidate_from_line(&mut self, from_line: usize);
+}
+```
+
+- **Incremental Convergence Algorithm (`IncrementalHighlightCache`):**
+  - Stores a `ropey::Rope` mirror of the document plus `line_checkpoints: Vec<(ParseState, ScopeStack)>` and `line_tokens: Vec<Vec<HighlightToken>>`.
+  - When an edit occurs (single-cursor or multi-cursor), computes the first modified line `first_diff_line` by comparing lines in the old `Rope` vs new `Rope` and calls `invalidate_from_line(first_diff_line)`.
+  - During rendering or query of visible lines `first_visible..=last_visible`:
+    - Re-tokenizes from `valid_up_to` using `SyntectTokenizer`.
+    - If re-tokenizing an edited line produces the exact same `(ParseState, ScopeStack)` exit state as was previously cached for `line + 1`, the remainder of the cache is immediately valid (`O(1)` lines re-lexed on typical typing).
+    - Guarantees `< 16ms` tokenization for 10,000+ lines and `< 1ms` per keystroke on the UI thread.
+- **Bracket Matching (`find_matching_bracket`):**
+  - Given the primary caret byte offset in `Rope`, inspects the character at `caret` or `caret - 1` for `(`, `)`, `{`, `}`, `[`, `]` and scans forward/backward (ignoring brackets inside `comment.*` or `string.*` scopes) to return `Some((open_byte, close_byte))`.
+
+### 3.3 `src/theme/mod.rs`, `src/theme/loader.rs`, `src/theme/manager.rs` — Color Themes
+
+- **`Style` & `ColorScheme` (`src/theme/mod.rs`):**
+  - `Style { pub foreground: RgbColor, pub background: Option<RgbColor>, pub bold: bool, pub italic: bool, pub underline: bool }`.
+  - `ScopeRule { pub name: String, pub selectors: Vec<String>, pub style: Style }`.
+  - `Theme` retains all existing fields (`name`, `is_dark`, `background`, `foreground`, `caret`, `secondary_caret`, `selection`, `selection_border`, `line_highlight`, `gutter`, `gutter_foreground`, `gutter_foreground_highlight`, `status_background`, `status_foreground`) **plus** `rules: Vec<ScopeRule>` and `brackets_foreground: RgbColor`.
+  - `Theme::style_for_scope(&self, scope: &str) -> Style`: scores each `ScopeRule` selector by hierarchical prefix match length against the token's scope stack (`comment.line.double-slash.rust` matches `comment.line` with score 2 and `comment` with score 1) and returns the highest-specificity `Style`.
+- **Theme Loaders (`src/theme/loader.rs`):**
+  - `load_sublime_color_scheme_str(json_str: &str) -> Result<Theme, String>`: parses `.sublime-color-scheme` JSON via `serde_json`, resolves `variables` (`var(name)`), parses `#RRGGBB` / `#RRGGBBAA` / `rgb(...)` / `hsl(...)` colors, extracts `globals` and `rules`.
+  - `load_tm_theme_str(xml_str: &str) -> Result<Theme, String>`: parses `.tmTheme` XML Plist via `plist::Value`, extracts global settings dict and per-scope rule dicts.
+- **`ThemeRegistry` (`src/theme/manager.rs`):**
+  - Loads all `.sublime-color-scheme` and `.tmTheme` files from `D:\github\rust\notepad\assets\themes\` and registers them alongside built-in presets for instant live switching via `Preferences > Select Theme` (`Format > Theme`).
+
+---
+
+## 4. UI & Command Integration (`src/window.rs`, `src/menu.rs`, `src/tabs.rs`)
+
+1. **Menu Commands (`src/menu.rs`):**
+   - `View > Select Syntax`:
+     - `ID_VIEW_SYNTAX_RUST` (`Rust`)
+     - `ID_VIEW_SYNTAX_JS` (`JavaScript`)
+     - `ID_VIEW_SYNTAX_PYTHON` (`Python`)
+     - `ID_VIEW_SYNTAX_PLAIN` (`Plain Text`)
+   - `Preferences > Select Theme` (and `Format > Theme`):
+     - `ID_FORMAT_THEME_MARIANA` (`Mariana (assets/themes/Mariana.sublime-color-scheme)`)
+     - `ID_FORMAT_THEME_MONOKAI` (`Monokai (assets/themes/Monokai.tmTheme)`)
+     - `ID_FORMAT_THEME_BREAKERS` (`Breakers Light`)
+     - `ID_FORMAT_THEME_CLASSIC` (`Classic Notepad Light`)
+2. **Editor Token & Bracket Rendering (`src/window.rs`):**
+   - Each `Tab` (`src/tabs.rs`) stores `syntax_name: String` (auto-detected on file open or first line edit).
+   - `NotepadAppState` holds `syntax_registry: Arc<SyntaxRegistry>`, `theme_registry: ThemeRegistry`, and `highlight_cache: IncrementalHighlightCache`.
+   - In `edit_subclass_proc` (`WM_PAINT`), after the base control paints:
+     - `render_syntax_highlighted_viewport()` queries the visible line range (`first_visible..=last_visible`), fetches cached token spans from `highlight_cache`, and draws each colored token (with bold/italic font variants for keywords/comments) + matching bracket underlines directly onto `hwnd_edit`, followed by `render_multi_cursor_and_block_overlays()`.
+   - Status bar displays the active syntax name (`| Rust |`, `| JavaScript |`, `| Python |`, `| Plain Text |`) and active theme name.

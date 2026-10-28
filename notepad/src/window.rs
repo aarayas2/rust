@@ -31,6 +31,7 @@ use crate::file_io::{
     set_edit_text, TextEncoding,
 };
 use crate::font::{format_sublime_window_title, FontState};
+use crate::highlight::{IncrementalHighlightCache, GLOBAL_SYNTAX_REGISTRY};
 use crate::menu::{
     create_notepad_menu, init_menu, EditorState, EM_GETSEL, EM_REPLACESEL, EM_SCROLLCARET,
     EM_SETSEL, EM_UNDO, IDM_CTX_SIDEBAR_CLOSE_FOLDER, IDM_CTX_SIDEBAR_COPY_PATH,
@@ -44,11 +45,12 @@ use crate::menu::{
     ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_CLASSIC, ID_FORMAT_THEME_MARIANA,
     ID_FORMAT_THEME_MONOKAI, ID_PREF_FONT_CASCADIA, ID_PREF_FONT_CONSOLAS, ID_PREF_FONT_COURIER,
     ID_PREF_FONT_LARGER, ID_PREF_FONT_RESET, ID_PREF_FONT_SMALLER, ID_PREF_SHOW_FULL_PATH,
-    ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS, ID_VIEW_TOGGLE_SIDEBAR,
+    ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS, ID_VIEW_SYNTAX_JS, ID_VIEW_SYNTAX_PLAIN,
+    ID_VIEW_SYNTAX_PYTHON, ID_VIEW_SYNTAX_RUST, ID_VIEW_TOGGLE_SIDEBAR,
 };
 use crate::save_dialog::{OpenFileDialog, SaveFileDialog};
 use crate::tabs::{TabHitTarget, TabManager, TAB_BAR_HEIGHT};
-use crate::theme::{GutterLayout, Theme, ThemePreset};
+use crate::theme::{ColorScheme, GutterLayout, Theme, ThemePreset, ThemeRegistry};
 use crate::word_wrap::{create_edit_control, WordWrap, WordWrapManager, ID_FORMAT_WORDWRAP};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -58,7 +60,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetDC, GetDeviceCaps,
     GetStockObject, GetTextExtentPoint32W, GetTextMetricsW, InvalidateRect, InvertRect, ReleaseDC,
     SelectObject, SetBkColor, SetBkMode, SetTextColor, TextOutW, COLOR_WINDOW, DEFAULT_GUI_FONT,
-    HBRUSH, HDC, HFONT, HGDIOBJ, LOGPIXELSY, PAINTSTRUCT, TEXTMETRICW, TRANSPARENT,
+    HBRUSH, HDC, HFONT, HGDIOBJ, LOGPIXELSY, OPAQUE, PAINTSTRUCT, TEXTMETRICW, TRANSPARENT,
 };
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -154,11 +156,23 @@ pub struct NotepadAppState {
     pub edit_hfont: HFONT,
     /// Whether to display the full file path in the window title bar (`"show_full_path"` at `0x1406BCD34`).
     pub show_full_path: bool,
+    /// Incremental syntax highlighting cache backed by `ropey::Rope` and `syntect`.
+    pub highlight_cache: IncrementalHighlightCache,
+    /// Color theme registry loading `.sublime-color-scheme` and `.tmTheme` files from `assets/themes/`.
+    pub theme_registry: ThemeRegistry,
+    /// Currently active parsed `ColorScheme` (`Theme` globals + token `ScopeRule`s).
+    pub color_scheme: ColorScheme,
 }
 
 impl NotepadAppState {
     /// Returns the current `EditorState` snapshot used by `init_menu` (`0x14000F2A0`).
     pub fn editor_state(&self) -> EditorState {
+        let active_syntax_cmd = match self.highlight_cache.syntax_name() {
+            "Rust" => ID_VIEW_SYNTAX_RUST,
+            "JavaScript" => ID_VIEW_SYNTAX_JS,
+            "Python" => ID_VIEW_SYNTAX_PYTHON,
+            _ => ID_VIEW_SYNTAX_PLAIN,
+        };
         EditorState {
             word_wrap: self.word_wrap.state(),
             status_bar_visible: self.status_bar_visible,
@@ -166,7 +180,28 @@ impl NotepadAppState {
             sidebar_visible: self.file_explorer.is_visible && self.file_explorer.root_path.is_some(),
             theme_preset: self.theme_preset,
             show_full_path: self.show_full_path,
+            active_syntax_cmd,
         }
+    }
+
+    /// Sets the active syntax definition by name (`View > Select Syntax`), re-tokenizes the active
+    /// buffer incrementally, and repaints the viewport and status bar.
+    pub fn set_syntax(&mut self, syntax_name: &str) {
+        let resolved = GLOBAL_SYNTAX_REGISTRY
+            .find_by_name(syntax_name)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "Plain Text".to_string());
+        if !self.tab_manager.tabs.is_empty() {
+            self.tab_manager.active_tab_mut().syntax_name = resolved.clone();
+        }
+        self.highlight_cache
+            .set_syntax_and_text(&resolved, self.multi_cursor.text());
+        if !self.hwnd_edit.is_invalid() {
+            unsafe {
+                let _ = InvalidateRect(Some(self.hwnd_edit), None, false);
+            }
+        }
+        self.update_status_bar();
     }
 
     /// Snapshots the active editor state (`hwnd_edit` text, selection, scroll line, dirty state,
@@ -212,7 +247,7 @@ impl NotepadAppState {
     }
 
     /// Loads `self.tab_manager.active_tab()` into `hwnd_edit`, `self.current_file`,
-    /// `self.encoding`, and `self.multi_cursor`, and refreshes the UI.
+    /// `self.encoding`, `self.multi_cursor`, and `self.highlight_cache`, and refreshes the UI.
     pub fn load_active_tab_state(&mut self) {
         if self.hwnd_edit.is_invalid() || self.tab_manager.tabs.is_empty() {
             return;
@@ -225,6 +260,8 @@ impl NotepadAppState {
         if self.multi_cursor.text() != tab.content {
             self.multi_cursor.set_text(&tab.content);
         }
+        self.highlight_cache
+            .set_syntax_and_text(&tab.syntax_name, &tab.content);
 
         set_edit_text(self.hwnd_edit, &tab.content);
         set_edit_modified(self.hwnd_edit, tab.is_dirty);
@@ -328,11 +365,12 @@ impl NotepadAppState {
         self.update_window_title();
     }
 
-    /// Switches the active color scheme preset, recreates GDI background brushes for
-    /// `WM_CTLCOLOREDIT` / `WM_CTLCOLORSTATIC`, and repaints the editor, gutter, and status bar.
+    /// Switches the active color scheme preset via `ThemeRegistry`, recreates GDI background brushes
+    /// for `WM_CTLCOLOREDIT` / `WM_CTLCOLORSTATIC`, and repaints the editor, gutter, and status bar.
     pub fn set_theme_preset(&mut self, preset: ThemePreset) {
         self.theme_preset = preset;
-        self.theme = Theme::from_preset(preset);
+        self.color_scheme = self.theme_registry.set_active_preset(preset);
+        self.theme = self.color_scheme.theme;
 
         unsafe {
             if !self.edit_bg_brush.is_invalid() {
@@ -474,6 +512,25 @@ impl NotepadAppState {
             sel_end as usize,
         );
         self.tab_manager.set_active_dirty(is_dirty);
+
+        // If untitled tab is still Plain Text, check if first line now matches a shebang rule
+        let first_line = current_text.lines().next().unwrap_or("");
+        if self.current_file.is_none() && self.highlight_cache.syntax_name() == "Plain Text" {
+            let detected = GLOBAL_SYNTAX_REGISTRY.detect_syntax(None, first_line);
+            if detected.name != "Plain Text" {
+                let name = detected.name.clone();
+                self.tab_manager.active_tab_mut().syntax_name = name.clone();
+                self.highlight_cache.set_syntax_and_text(&name, &current_text);
+            }
+        }
+
+        let dirty_line = self
+            .multi_cursor
+            .byte_to_2d(self.multi_cursor.cursors.primary().position)
+            .line;
+        self.highlight_cache
+            .update_text_from_line(&current_text, dirty_line);
+
         let active_tab = self.tab_manager.active_tab_mut();
         active_tab.content = current_text;
         active_tab.selection = (sel_start, sel_end);
@@ -483,6 +540,7 @@ impl NotepadAppState {
             self.relayout_viewport();
         } else {
             unsafe {
+                let _ = InvalidateRect(Some(self.hwnd_edit), None, false);
                 self.render_chrome_direct();
             }
         }
@@ -504,6 +562,13 @@ impl NotepadAppState {
                 self.tab_manager.set_active_dirty(true);
             }
         }
+
+        let dirty_line = self
+            .multi_cursor
+            .byte_to_2d(self.multi_cursor.cursors.primary().position)
+            .line;
+        self.highlight_cache
+            .update_text_from_line(&target_text, dirty_line);
 
         let primary = self.multi_cursor.cursors.primary();
         let (sel_start_byte, sel_end_byte) = if self.multi_cursor.cursors.is_multi()
@@ -653,7 +718,7 @@ impl NotepadAppState {
         };
 
         let status_str = format!(
-            "  Ln {}, Col {}{}{}{}   |   {} {}pt ({}%)   |   {}   |   {}\0",
+            "  Ln {}, Col {}{}{}{}   |   {} {}pt ({}%)   |   {}   |   {}   |   {}\0",
             line,
             col,
             tab_badge,
@@ -663,6 +728,7 @@ impl NotepadAppState {
             self.font_state.font_size,
             self.font_state.scale_percent(),
             self.theme.name,
+            self.highlight_cache.syntax_name(),
             enc_label
         );
         let wide: Vec<u16> = status_str.encode_utf16().collect();
@@ -938,6 +1004,11 @@ impl NotepadAppState {
             Ok(()) => {
                 self.current_file = Some(path.clone());
                 set_edit_modified(self.hwnd_edit, false);
+                let first_line = text.lines().next().unwrap_or("");
+                let detected_syntax = GLOBAL_SYNTAX_REGISTRY
+                    .detect_syntax(Some(&path), first_line)
+                    .name
+                    .clone();
                 let active = self.tab_manager.active_tab_mut();
                 active.path = Some(path.clone());
                 active.title = path
@@ -947,7 +1018,10 @@ impl NotepadAppState {
                     .to_string();
                 active.is_dirty = false;
                 active.is_preview = false;
-                active.content = text;
+                active.content = text.clone();
+                active.syntax_name = detected_syntax.clone();
+                self.highlight_cache
+                    .set_syntax_and_text(&detected_syntax, &text);
                 self.file_explorer.refresh();
                 self.update_window_title();
                 self.update_status_bar();
@@ -1073,6 +1147,146 @@ impl NotepadAppState {
     pub fn cmd_multi_delete(&mut self) {
         self.multi_cursor.delete_forward();
         self.sync_to_hwnd_edit(true);
+    }
+
+    /// Renders syntax-highlighted token spans (`comment.line`, `keyword.control`, `string.quoted`,
+    /// `entity.name.function`, `constant.numeric`, `storage.type`, etc.) and matching bracket
+    /// underlines onto the visible viewport of `hwnd_edit`.
+    pub unsafe fn render_syntax_highlighted_viewport(&mut self) {
+        if self.hwnd_edit.is_invalid() {
+            return;
+        }
+        let is_plain = self.highlight_cache.syntax_name() == "Plain Text";
+        let bracket_pair = self
+            .highlight_cache
+            .find_matching_bracket(self.multi_cursor.cursors.primary().position);
+        if is_plain && bracket_pair.is_none() {
+            return;
+        }
+
+        let hdc = GetDC(Some(self.hwnd_edit));
+        if hdc.is_invalid() {
+            return;
+        }
+
+        let hfont = SendMessageW(self.hwnd_edit, WM_GETFONT, None, None);
+        let old_font = if hfont.0 != 0 {
+            SelectObject(hdc, HGDIOBJ(hfont.0 as *mut core::ffi::c_void))
+        } else {
+            HGDIOBJ::default()
+        };
+
+        let mut tm = TEXTMETRICW::default();
+        let _ = GetTextMetricsW(hdc, &mut tm);
+        let line_height = tm.tmHeight.max(14);
+        let ave_char_w = tm.tmAveCharWidth.max(7);
+
+        let mut edit_rc = RECT::default();
+        let _ = GetClientRect(self.hwnd_edit, &mut edit_rc);
+        let edit_h = (edit_rc.bottom - edit_rc.top).max(line_height);
+        let visible_lines = ((edit_h / line_height) as usize) + 2;
+
+        let first_visible = SendMessageW(self.hwnd_edit, EM_GETFIRSTVISIBLELINE, None, None)
+            .0
+            .max(0) as usize;
+        let line_ranges = self.multi_cursor.line_content_ranges();
+        let total_lines = line_ranges.len();
+
+        if !is_plain && total_lines > 0 {
+            let last_visible = (first_visible + visible_lines).min(total_lines.saturating_sub(1));
+            self.highlight_cache
+                .ensure_highlighted_up_to(&GLOBAL_SYNTAX_REGISTRY, last_visible);
+
+            // Query current single-cursor native selection so we preserve native selection inversion
+            let mut sel_start_u16: u32 = 0;
+            let mut sel_end_u16: u32 = 0;
+            SendMessageW(
+                self.hwnd_edit,
+                EM_GETSEL,
+                Some(WPARAM(&mut sel_start_u16 as *mut u32 as usize)),
+                Some(LPARAM(&mut sel_end_u16 as *mut u32 as isize)),
+            );
+            let has_native_sel = sel_start_u16 != sel_end_u16;
+            let sel_start_byte = if has_native_sel {
+                utf16_to_byte_offset(self.multi_cursor.text(), sel_start_u16 as usize)
+            } else {
+                0
+            };
+            let sel_end_byte = if has_native_sel {
+                utf16_to_byte_offset(self.multi_cursor.text(), sel_end_u16 as usize)
+            } else {
+                0
+            };
+
+            let _ = SetBkMode(hdc, OPAQUE);
+            let _ = SetBkColor(hdc, self.theme.background.to_colorref());
+
+            for line_idx in first_visible..=last_visible {
+                let Some(line_range) = line_ranges.get(line_idx) else {
+                    continue;
+                };
+                let line_str = &self.multi_cursor.text()[line_range.clone()];
+                if line_str.is_empty() {
+                    continue;
+                }
+                let tokens = self.highlight_cache.line_tokens(line_idx);
+                for tok in tokens {
+                    if tok.range.start >= tok.range.end || tok.range.end > line_str.len() {
+                        continue;
+                    }
+                    let slice = &line_str[tok.range.clone()];
+                    if slice.trim().is_empty() || slice.contains('\t') {
+                        continue;
+                    }
+                    let style = self.color_scheme.style_for_scope(&tok.scope);
+                    if style.foreground == self.theme.foreground && style.background.is_none() {
+                        continue;
+                    }
+                    let global_start = line_range.start + tok.range.start;
+                    let global_end = line_range.start + tok.range.end;
+                    if has_native_sel && global_start < sel_end_byte && global_end > sel_start_byte
+                    {
+                        continue;
+                    }
+
+                    let (x, y) = self.char_byte_to_client_xy(global_start, line_height);
+                    if y + line_height < 0 || y > edit_h {
+                        continue;
+                    }
+                    if let Some(bg) = style.background {
+                        let _ = SetBkColor(hdc, bg.to_colorref());
+                    } else {
+                        let _ = SetBkColor(hdc, self.theme.background.to_colorref());
+                    }
+                    let _ = SetTextColor(hdc, style.foreground.to_colorref());
+                    let wide: Vec<u16> = slice.encode_utf16().collect();
+                    let _ = TextOutW(hdc, x, y, &wide);
+                }
+            }
+        }
+
+        // Render Bracket Matching underline indicators when caret is adjacent to `()`, `{}`, `[]`
+        if let Some((open_byte, close_byte)) = bracket_pair {
+            let bracket_brush = CreateSolidBrush(self.theme.brackets_foreground.to_colorref());
+            for b_pos in [open_byte, close_byte] {
+                let (bx, by) = self.char_byte_to_client_xy(b_pos, line_height);
+                if by >= 0 && by + line_height <= edit_h + line_height {
+                    let ul_rect = RECT {
+                        left: bx,
+                        top: (by + line_height - 2).max(by),
+                        right: bx + ave_char_w,
+                        bottom: by + line_height,
+                    };
+                    let _ = FillRect(hdc, &ul_rect, bracket_brush);
+                }
+            }
+            let _ = DeleteObject(HGDIOBJ(bracket_brush.0));
+        }
+
+        if !old_font.is_invalid() {
+            let _ = SelectObject(hdc, old_font);
+        }
+        let _ = ReleaseDC(Some(self.hwnd_edit), hdc);
     }
 
     /// Renders multiple carets, secondary stream selections, and rectangular block selections
@@ -1842,6 +2056,7 @@ pub unsafe extern "system" fn edit_subclass_proc(
 
         WM_PAINT => {
             let res = CallWindowProcW(prev_proc, hwnd_edit, msg, wparam, lparam);
+            state.render_syntax_highlighted_viewport();
             state.render_multi_cursor_and_block_overlays();
             state.render_gutter_direct();
             return res;
@@ -1983,7 +2198,9 @@ pub fn create_notepad_window(
 
     // 5. Box application state with Sublime Mariana Dark theme, TabManager, FileExplorer, & gutter enabled
     let initial_preset = ThemePreset::MarianaDark;
-    let initial_theme = Theme::from_preset(initial_preset);
+    let mut theme_registry = ThemeRegistry::new_default();
+    let initial_color_scheme = theme_registry.set_active_preset(initial_preset);
+    let initial_theme = initial_color_scheme.theme;
     let (edit_bg_brush, status_bg_brush) = unsafe {
         (
             CreateSolidBrush(initial_theme.background.to_colorref()),
@@ -2017,6 +2234,9 @@ pub fn create_notepad_window(
         font_state: FontState::default(),
         edit_hfont: HFONT::default(),
         show_full_path: true,
+        highlight_cache: IncrementalHighlightCache::new("Plain Text"),
+        theme_registry,
+        color_scheme: initial_color_scheme,
     });
     let state_ptr = Box::into_raw(state);
     unsafe {
@@ -2730,6 +2950,18 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                     }
                     ID_FORMAT_THEME_CLASSIC => {
                         state.set_theme_preset(ThemePreset::ClassicNotepad);
+                    }
+                    ID_VIEW_SYNTAX_RUST => {
+                        state.set_syntax("Rust");
+                    }
+                    ID_VIEW_SYNTAX_JS => {
+                        state.set_syntax("JavaScript");
+                    }
+                    ID_VIEW_SYNTAX_PYTHON => {
+                        state.set_syntax("Python");
+                    }
+                    ID_VIEW_SYNTAX_PLAIN => {
+                        state.set_syntax("Plain Text");
                     }
                     ID_VIEW_LINE_NUMBERS => {
                         state.toggle_line_numbers();

@@ -1,24 +1,28 @@
 //! # Notepad Core Win32 Reverse-Engineered Application & Library
 //!
 //! This crate contains a complete, clean-room, safe, and idiomatic Rust reimplementation
-//! of classic Windows Notepad (`C:\Windows\System32\notepad.exe`):
-//! - **Window Class & `WndProc` (`window.rs`):** Recreates `NPRegister` (`0x14001E28F`),
-//!   `NPInit` (`0x1400134DC` & `0x1400125E8`), `NPWndProc` (`0x14000E950`), `NPSize`
-//!   (`0x14000E848`), and `NPCommand` (`0x14000DA7C`).
-//! - **File I/O & Encoding Engine (`file_io.rs`):** Recreates `LoadFile` (`0x140010F48`)
-//!   and `SaveFile` (`0x140011AF8`), including BOM detection, embedded-NUL sanitization
-//!   (`0x1400115AE`), `.LOG` timestamp injection (`0x1400115C2`), and `EM_SETMODIFY` state.
-//! - **Menu Bar & State Synchronization (`menu.rs`):** Recreates the 5-submenu Notepad menu
-//!   bar and the 782-byte `InitMenu` subroutine (`0x14000F2A0`) called during `WM_INITMENU`.
-//! - **Word Wrap & Edit Recreation (`word_wrap.rs`):** Recreates `CheckMenuItem` (`0x14000F55A`)
-//!   and `NPReCreate` (`0x14001FA28`) to toggle `WS_HSCROLL` (`0x00100000`).
+//! of classic Windows Notepad (`C:\Windows\System32\notepad.exe`) upgraded with
+//! Sublime Text-inspired multi-tab, folder sidebar, multi-cursor, incremental syntax
+//! highlighting, extensible syntax definitions, and `.sublime-color-scheme` / `.tmTheme`
+//! color themes:
+//! - **Window Class & `WndProc` (`window.rs`):** Recreates `NPRegister`, `NPInit`,
+//!   `NPWndProc`, `NPSize`, and `NPCommand`.
+//! - **Incremental Syntax Highlighting (`highlight/`):** Ropey + Syntect `.sublime-syntax`
+//!   tokenizer + Tree-sitter fallback + `O(1)` line-state convergence cache.
+//! - **Color Theme Engine (`theme/`):** Parses `.sublime-color-scheme` (JSON) and `.tmTheme`
+//!   (XML Plist) files from `assets/themes/` with live theme switching.
+//! - **File I/O & Encoding Engine (`file_io.rs`):** BOM detection, embedded-NUL sanitization,
+//!   `.LOG` timestamp injection, and `EM_SETMODIFY` state.
+//! - **Menu Bar & State Synchronization (`menu.rs`):** 6-submenu menu bar and `InitMenu`.
+//! - **Word Wrap & Edit Recreation (`word_wrap.rs`):** Toggles `WS_HSCROLL` (`0x00100000`).
 //! - **Common File Dialogs (`save_dialog.rs`):** Safe builders around `GetOpenFileNameW`
-//!   (`0x14000D078`) and `GetSaveFileNameW` (`0x14000D2E8`).
+//!   and `GetSaveFileNameW`.
 
 pub mod cursor;
 pub mod file_explorer;
 pub mod file_io;
 pub mod font;
+pub mod highlight;
 pub mod menu;
 pub mod save_dialog;
 pub mod tabs;
@@ -42,9 +46,17 @@ pub use font::{
     format_sublime_window_title, FontState, DEFAULT_WINDOWS_FONT_FACE, DEFAULT_WINDOWS_FONT_SIZE,
     MAX_FONT_SIZE, MIN_MENU_FONT_SIZE, MIN_VIEW_FONT_SIZE,
 };
+pub use highlight::{
+    find_matching_bracket, HighlightToken, Highlighter, IncrementalHighlightCache, LineLexerState,
+    RegisteredSyntax, SyntaxDefinition, SyntaxRegistry, SyntectTokenizer, TreeSitterFallback,
+    GLOBAL_SYNTAX_REGISTRY,
+};
 pub use menu::{create_notepad_menu, init_menu, EditorState};
 pub use save_dialog::{OpenFileDialog, SaveDialogError, SaveFileDialog};
 pub use tabs::{Tab, TabHitTarget, TabManager, TabRect, TAB_BAR_HEIGHT};
-pub use theme::{GutterLayout, RgbColor, Theme, ThemePreset};
+pub use theme::{
+    ColorScheme, GutterLayout, RgbColor, ScopeRule, Style, Theme, ThemePreset, ThemeRegistry,
+    GLOBAL_THEME_REGISTRY,
+};
 pub use window::{create_notepad_window, notepad_wnd_proc, register_notepad_class, NotepadAppState};
 pub use word_wrap::{WordWrap, WordWrapManager};

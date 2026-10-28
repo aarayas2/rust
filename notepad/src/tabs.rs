@@ -62,6 +62,8 @@ pub struct Tab {
     pub scroll_line: i32,
     /// Per-tab multi-cursor and rectangular block-selection state.
     pub multi_cursor: MultiCursorEditor,
+    /// Active syntax definition name for this tab (e.g. `"Rust"`, `"JavaScript"`, `"Python"`, `"Plain Text"`).
+    pub syntax_name: String,
 }
 
 impl Tab {
@@ -78,10 +80,11 @@ impl Tab {
             selection: (0, 0),
             scroll_line: 0,
             multi_cursor: MultiCursorEditor::new(),
+            syntax_name: String::from("Plain Text"),
         }
     }
 
-    /// Creates a tab backed by a filesystem `path`.
+    /// Creates a tab backed by a filesystem `path` with automatic syntax detection.
     pub fn from_file(
         id: u64,
         path: PathBuf,
@@ -95,6 +98,11 @@ impl Tab {
             .filter(|s| !s.is_empty())
             .unwrap_or("Untitled")
             .to_string();
+        let first_line = content.lines().next().unwrap_or("");
+        let syntax_name = crate::highlight::GLOBAL_SYNTAX_REGISTRY
+            .detect_syntax(Some(&path), first_line)
+            .name
+            .clone();
         Self {
             id,
             path: Some(path),
@@ -106,6 +114,7 @@ impl Tab {
             selection: (0, 0),
             scroll_line: 0,
             multi_cursor: MultiCursorEditor::new(),
+            syntax_name,
         }
     }
 

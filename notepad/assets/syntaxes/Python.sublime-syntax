@@ -1,0 +1,70 @@
+%YAML 1.2
+---
+name: Python
+file_extensions:
+  - py
+  - pyw
+  - pyi
+first_line_match: '^#!/.*\bpython[0-9.-]*\b'
+scope: source.python
+
+contexts:
+  main:
+    - match: '#.*$'
+      scope: comment.line.number-sign.python
+    - match: '"""'
+      scope: punctuation.definition.string.begin.python
+      push: triple_double_string
+    - match: "'''"
+      scope: punctuation.definition.string.begin.python
+      push: triple_single_string
+    - match: '\b(def|class)\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+      captures:
+        1: storage.type.python
+        2: entity.name.function.python
+    - match: '\b(and|as|assert|async|await|break|case|continue|del|elif|else|except|finally|for|from|if|import|in|is|match|not|or|pass|raise|return|try|while|with|yield)\b'
+      scope: keyword.control.python
+    - match: '\b(class|def|global|lambda|nonlocal)\b'
+      scope: storage.type.python
+    - match: '\b(True|False|None|self|cls)\b'
+      scope: constant.language.python
+    - match: '\b(int|float|str|bool|list|dict|set|tuple|bytes|len|range|print|open|enumerate|zip|map|filter|isinstance|super)\b'
+      scope: support.function.builtin.python
+    - match: '\b0x[0-9a-fA-F_]+|\b0b[01_]+|\b[0-9][0-9_]*(\.[0-9_]+)?([eE][+-]?[0-9_]+)?j?\b'
+      scope: constant.numeric.python
+    - match: '@[a-zA-Z_][a-zA-Z0-9_.]*'
+      scope: entity.name.function.decorator.python
+    - match: '"'
+      scope: punctuation.definition.string.begin.python
+      push: double_string
+    - match: ''''
+      scope: punctuation.definition.string.begin.python
+      push: single_string
+
+  triple_double_string:
+    - meta_scope: string.quoted.triple.python
+    - match: '"""'
+      scope: punctuation.definition.string.end.python
+      pop: true
+
+  triple_single_string:
+    - meta_scope: string.quoted.triple.python
+    - match: "'''"
+      scope: punctuation.definition.string.end.python
+      pop: true
+
+  double_string:
+    - meta_scope: string.quoted.double.python
+    - match: '\\.'
+      scope: constant.character.escape.python
+    - match: '"'
+      scope: punctuation.definition.string.end.python
+      pop: true
+
+  single_string:
+    - meta_scope: string.quoted.single.python
+    - match: '\\.'
+      scope: constant.character.escape.python
+    - match: ''''
+      scope: punctuation.definition.string.end.python
+      pop: true

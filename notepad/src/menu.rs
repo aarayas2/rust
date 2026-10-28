@@ -111,11 +111,17 @@ pub const IDM_CTX_SIDEBAR_COPY_PATH: u32 = 0x8A;
 pub const IDM_CTX_SIDEBAR_REFRESH: u32 = 0x8B;
 pub const IDM_CTX_SIDEBAR_CLOSE_FOLDER: u32 = 0x8C;
 
-// Sublime-inspired Color Scheme Theme Command IDs (Format & Preferences Menus)
+// Sublime-inspired Color Scheme Theme Command IDs (Format & Preferences > Select Theme Menus)
 pub const ID_FORMAT_THEME_MARIANA: u32 = 0x61;
 pub const ID_FORMAT_THEME_MONOKAI: u32 = 0x62;
 pub const ID_FORMAT_THEME_BREAKERS: u32 = 0x63;
 pub const ID_FORMAT_THEME_CLASSIC: u32 = 0x64;
+
+// Sublime-inspired View > Select Syntax Command IDs
+pub const ID_VIEW_SYNTAX_RUST: u32 = 0x90;
+pub const ID_VIEW_SYNTAX_JS: u32 = 0x91;
+pub const ID_VIEW_SYNTAX_PYTHON: u32 = 0x92;
+pub const ID_VIEW_SYNTAX_PLAIN: u32 = 0x93;
 
 // Sublime-inspired Preferences > Font > Larger / Smaller / Reset Size Command IDs
 // (`Main.sublime-menu` lines 956-966: `increase_font_size`, `decrease_font_size`, `reset_font_size`, `choose_font`)
@@ -136,6 +142,7 @@ pub struct EditorState {
     pub sidebar_visible: bool,
     pub theme_preset: ThemePreset,
     pub show_full_path: bool,
+    pub active_syntax_cmd: u32,
 }
 
 fn append_menu_str(hmenu: HMENU, flags: MENU_ITEM_FLAGS, id: usize, text: &str) {
@@ -291,6 +298,39 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
 
         // Submenu 3: View
         let view_menu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (View) failed")?;
+        let syntax_submenu =
+            CreatePopupMenu().map_err(|_| "CreatePopupMenu (Select Syntax) failed")?;
+        append_menu_str(
+            syntax_submenu,
+            MF_STRING,
+            ID_VIEW_SYNTAX_RUST as usize,
+            "&Rust (.rs)",
+        );
+        append_menu_str(
+            syntax_submenu,
+            MF_STRING,
+            ID_VIEW_SYNTAX_JS as usize,
+            "&JavaScript (.js)",
+        );
+        append_menu_str(
+            syntax_submenu,
+            MF_STRING,
+            ID_VIEW_SYNTAX_PYTHON as usize,
+            "&Python (.py)",
+        );
+        append_menu_str(
+            syntax_submenu,
+            MF_STRING,
+            ID_VIEW_SYNTAX_PLAIN as usize,
+            "P&lain Text (.txt)",
+        );
+        append_menu_str(
+            view_menu,
+            MF_POPUP,
+            syntax_submenu.0 as usize,
+            "Select &Syntax",
+        );
+        let _ = AppendMenuW(view_menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_menu_str(
             view_menu,
             MF_STRING,
@@ -322,6 +362,39 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
 
         // Submenu 4: Preferences (Sublime Text `Main.sublime-menu` lines 900-968)
         let pref_menu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (Preferences) failed")?;
+        let theme_submenu =
+            CreatePopupMenu().map_err(|_| "CreatePopupMenu (Select Theme) failed")?;
+        append_menu_str(
+            theme_submenu,
+            MF_STRING,
+            ID_FORMAT_THEME_MARIANA as usize,
+            "&Mariana (Sublime Dark)",
+        );
+        append_menu_str(
+            theme_submenu,
+            MF_STRING,
+            ID_FORMAT_THEME_MONOKAI as usize,
+            "M&onokai (Sublime Dark)",
+        );
+        append_menu_str(
+            theme_submenu,
+            MF_STRING,
+            ID_FORMAT_THEME_BREAKERS as usize,
+            "&Breakers (Sublime Light)",
+        );
+        append_menu_str(
+            theme_submenu,
+            MF_STRING,
+            ID_FORMAT_THEME_CLASSIC as usize,
+            "&Classic Notepad (Light)",
+        );
+        append_menu_str(
+            pref_menu,
+            MF_POPUP,
+            theme_submenu.0 as usize,
+            "Select &Theme",
+        );
+        let _ = AppendMenuW(pref_menu, MF_SEPARATOR, 0, PCWSTR::null());
         let font_submenu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (Font) failed")?;
         append_menu_str(
             font_submenu,
@@ -508,10 +581,38 @@ pub fn init_menu(
                 MF_UNCHECKED
             } | MF_BYCOMMAND;
             CheckMenuItem(view_menu, ID_VIEW_TOGGLE_SIDEBAR, sidebar_check.0);
+
+            for syn_id in [
+                ID_VIEW_SYNTAX_RUST,
+                ID_VIEW_SYNTAX_JS,
+                ID_VIEW_SYNTAX_PYTHON,
+                ID_VIEW_SYNTAX_PLAIN,
+            ] {
+                let flag = if state.active_syntax_cmd == syn_id {
+                    MF_CHECKED
+                } else {
+                    MF_UNCHECKED
+                } | MF_BYCOMMAND;
+                CheckMenuItem(hmenu, syn_id, flag.0);
+            }
         }
 
-        // 8. Preferences Menu: CheckMenuItem for Show Full Path in Title Bar
+        // 8. Preferences Menu: CheckMenuItem for Select Theme & Show Full Path in Title Bar
         if !pref_menu.is_invalid() {
+            for (cmd_id, preset) in [
+                (ID_FORMAT_THEME_MARIANA, ThemePreset::MarianaDark),
+                (ID_FORMAT_THEME_MONOKAI, ThemePreset::MonokaiDark),
+                (ID_FORMAT_THEME_BREAKERS, ThemePreset::BreakersLight),
+                (ID_FORMAT_THEME_CLASSIC, ThemePreset::ClassicNotepad),
+            ] {
+                let flag = if state.theme_preset == preset {
+                    MF_CHECKED
+                } else {
+                    MF_UNCHECKED
+                } | MF_BYCOMMAND;
+                CheckMenuItem(pref_menu, cmd_id, flag.0);
+            }
+
             let full_path_check = if state.show_full_path {
                 MF_CHECKED
             } else {

@@ -1,0 +1,52 @@
+%YAML 1.2
+---
+name: Rust
+file_extensions:
+  - rs
+first_line_match: '^#!.*\brust'
+scope: source.rust
+
+contexts:
+  main:
+    - match: '//.*$'
+      scope: comment.line.double-slash.rust
+    - match: '/\*'
+      scope: punctuation.definition.comment.rust
+      push: block_comment
+    - match: '\b(fn)\s+([a-zA-Z_][a-zA-Z0-9_]*)'
+      captures:
+        1: storage.type.rust
+        2: entity.name.function.rust
+    - match: '\b(async|await|break|continue|else|for|if|in|loop|match|move|return|while|yield)\b'
+      scope: keyword.control.rust
+    - match: '\b(as|const|crate|dyn|enum|extern|fn|impl|let|mod|mut|pub|ref|Self|self|static|struct|super|trait|type|unsafe|use|where)\b'
+      scope: storage.type.rust
+    - match: '\b(bool|char|f32|f64|i8|i16|i32|i64|i128|isize|str|u8|u16|u32|u64|u128|usize|String|Vec|Option|Result|Box|Arc|Rc)\b'
+      scope: storage.type.primitive.rust
+    - match: '\b(true|false|Some|None|Ok|Err)\b'
+      scope: constant.language.rust
+    - match: '\b0x[0-9a-fA-F_]+|\b0b[01_]+|\b[0-9][0-9_]*(\.[0-9_]+)?([eE][+-]?[0-9_]+)?(u8|u16|u32|u64|usize|i32|i64|f32|f64)?\b'
+      scope: constant.numeric.rust
+    - match: '\b([a-z_][a-zA-Z0-9_]*!)'
+      scope: support.function.macro.rust
+    - match: '#\[[^\]]*\]|#\!\[[^\]]*\]'
+      scope: meta.annotation.rust
+    - match: '"'
+      scope: punctuation.definition.string.begin.rust
+      push: double_string
+    - match: '''(?:[^''\\]|\\.)'''
+      scope: string.quoted.single.rust
+
+  block_comment:
+    - meta_scope: comment.block.rust
+    - match: '\*/'
+      scope: punctuation.definition.comment.rust
+      pop: true
+
+  double_string:
+    - meta_scope: string.quoted.double.rust
+    - match: '\\.'
+      scope: constant.character.escape.rust
+    - match: '"'
+      scope: punctuation.definition.string.end.rust
+      pop: true
