@@ -58,6 +58,9 @@ pub use theme::{
     ColorScheme, GutterLayout, RgbColor, ScopeRule, Style, Theme, ThemePreset, ThemeRegistry,
     GLOBAL_THEME_REGISTRY,
 };
-pub use window::{create_notepad_window, notepad_wnd_proc, register_notepad_class, NotepadAppState};
+pub use window::{
+    create_notepad_window, notepad_wnd_proc, register_notepad_class, NotepadAppState,
+};
 pub use word_wrap::{WordWrap, WordWrapManager};
+pub mod scrollbar;
 pub mod session;

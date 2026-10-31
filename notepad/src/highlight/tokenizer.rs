@@ -50,9 +50,7 @@ impl SyntectTokenizer {
         let mut parse_state = entry_state.parse_state.clone();
         let mut scope_stack = entry_state.scope_stack.clone();
 
-        let visible_len = line_with_newline
-            .trim_end_matches(&['\r', '\n'][..])
-            .len();
+        let visible_len = line_with_newline.trim_end_matches(&['\r', '\n'][..]).len();
 
         let ops = match parse_state.parse_line(line_with_newline, registry.syntax_set()) {
             Ok(ops) => ops,

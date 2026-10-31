@@ -53,8 +53,8 @@
 use std::path::Path;
 use windows::core::PCWSTR;
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, CLEARTYPE_QUALITY, DEFAULT_CHARSET, FF_MODERN, FIXED_PITCH, FW_NORMAL, HFONT,
-    OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
+    CreateFontW, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, FF_MODERN, FIXED_PITCH,
+    FW_NORMAL, HFONT, OUT_TT_PRECIS,
 };
 
 /// Default editor font face on Windows (`Preferences (Windows).sublime-settings` line 2).

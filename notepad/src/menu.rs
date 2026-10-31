@@ -161,7 +161,12 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
         // Submenu 0: File
         let file_menu = CreatePopupMenu().map_err(|_| "CreatePopupMenu (File) failed")?;
         append_menu_str(file_menu, MF_STRING, IDM_FILENEW as usize, "&New\tCtrl+N");
-        append_menu_str(file_menu, MF_STRING, IDM_FILEOPEN as usize, "&Open...\tCtrl+O");
+        append_menu_str(
+            file_menu,
+            MF_STRING,
+            IDM_FILEOPEN as usize,
+            "&Open...\tCtrl+O",
+        );
         append_menu_str(
             file_menu,
             MF_STRING,
@@ -192,7 +197,12 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
         let _ = AppendMenuW(edit_menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_menu_str(edit_menu, MF_STRING, ID_EDIT_CUT as usize, "Cu&t\tCtrl+X");
         append_menu_str(edit_menu, MF_STRING, ID_EDIT_COPY as usize, "&Copy\tCtrl+C");
-        append_menu_str(edit_menu, MF_STRING, ID_EDIT_PASTE as usize, "&Paste\tCtrl+V");
+        append_menu_str(
+            edit_menu,
+            MF_STRING,
+            ID_EDIT_PASTE as usize,
+            "&Paste\tCtrl+V",
+        );
         append_menu_str(edit_menu, MF_STRING, ID_EDIT_CLEAR as usize, "De&lete\tDel");
         let _ = AppendMenuW(edit_menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_menu_str(
@@ -201,7 +211,12 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
             ID_EDIT_BINGSEARCH as usize,
             "&Search with Bing...\tCtrl+E",
         );
-        append_menu_str(edit_menu, MF_STRING, ID_EDIT_FIND as usize, "&Find...\tCtrl+F");
+        append_menu_str(
+            edit_menu,
+            MF_STRING,
+            ID_EDIT_FIND as usize,
+            "&Find...\tCtrl+F",
+        );
         append_menu_str(
             edit_menu,
             MF_STRING,
@@ -214,7 +229,12 @@ pub fn create_notepad_menu() -> Result<HMENU, &'static str> {
             ID_EDIT_FINDPREV as usize,
             "Find &Previous\tShift+F3",
         );
-        append_menu_str(edit_menu, MF_STRING, ID_EDIT_GOTO as usize, "&Go To...\tCtrl+G");
+        append_menu_str(
+            edit_menu,
+            MF_STRING,
+            ID_EDIT_GOTO as usize,
+            "&Go To...\tCtrl+G",
+        );
         let _ = AppendMenuW(edit_menu, MF_SEPARATOR, 0, PCWSTR::null());
         append_menu_str(
             edit_menu,

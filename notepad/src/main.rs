@@ -145,11 +145,16 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
 
     // 1. Create hidden Notepad window + child Edit control + Status Bar (NPRegister + NPInit)
     let hwnd = create_notepad_window(hinstance, None)?;
-    println!("[OK] 1. Registered 'Notepad' class & created main HWND ({:?})", hwnd);
+    println!(
+        "[OK] 1. Registered 'Notepad' class & created main HWND ({:?})",
+        hwnd
+    );
 
     unsafe {
         let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut NotepadAppState;
-        let state = state_ptr.as_mut().ok_or("Missing NotepadAppState in GWLP_USERDATA")?;
+        let state = state_ptr
+            .as_mut()
+            .ok_or("Missing NotepadAppState in GWLP_USERDATA")?;
         println!(
             "[OK] 2. Spawned child 'Edit' control ({:?}) and Status Bar ({:?})",
             state.hwnd_edit, state.hwnd_status
@@ -169,7 +174,10 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
 
         let current_text = get_edit_text(state.hwnd_edit);
         assert!(current_text.starts_with(".LOG\r\nHello from reverse-engineered Rust Notepad!"));
-        assert!(current_text.len() > sample_text.len(), ".LOG timestamp should be appended");
+        assert!(
+            current_text.len() > sample_text.len(),
+            ".LOG timestamp should be appended"
+        );
         println!(
             "[OK] 4. Verified CreateFileW/ReadFile/WriteFile, BOM, and .LOG timestamp injection"
         );
@@ -207,7 +215,9 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
 
         // 7. Test Multi-Cursor & Block Selection integration (Step 3 verification)
         set_edit_text(state.hwnd_edit, "item_a = 10\r\nitem_b = 20\r\nitem_c = 30");
-        state.multi_cursor.set_text("item_a = 10\r\nitem_b = 20\r\nitem_c = 30");
+        state
+            .multi_cursor
+            .set_text("item_a = 10\r\nitem_b = 20\r\nitem_c = 30");
         SendMessageW(
             hwnd,
             WM_COMMAND,
@@ -235,10 +245,15 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
             Some(LPARAM(0)),
         );
         assert_eq!(state.multi_cursor.cursors.count(), 1);
-        let col_pos = state
+        let col_pos = state.multi_cursor.pos_2d_to_byte(Position2D {
+            line: 0,
+            column: 10,
+        });
+        state
             .multi_cursor
-            .pos_2d_to_byte(Position2D { line: 0, column: 10 });
-        state.multi_cursor.cursors.primary_mut().move_to(col_pos, false);
+            .cursors
+            .primary_mut()
+            .move_to(col_pos, false);
         state.multi_cursor.block_select(BlockDirection::Down);
         state.multi_cursor.block_select(BlockDirection::Down);
         state.multi_cursor.block_select(BlockDirection::Right);

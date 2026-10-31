@@ -16,8 +16,8 @@ use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Controls::Dialogs::{
     CommDlgExtendedError, GetOpenFileNameW, GetSaveFileNameW, OFN_ENABLESIZING, OFN_EXPLORER,
-    OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST,
-    OPENFILENAMEW, OPEN_FILENAME_FLAGS,
+    OFN_FILEMUSTEXIST, OFN_HIDEREADONLY, OFN_OVERWRITEPROMPT, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+    OPEN_FILENAME_FLAGS,
 };
 
 /// Buffer size matching Notepad's allocation: 260 characters (`MAX_PATH`, `mov edi, 0x104` at `0x14000D321`).
@@ -25,8 +25,7 @@ pub const MAX_PATH_LEN: usize = 260;
 
 /// Default Notepad file filter:
 /// `"Text Documents (*.txt)\0*.txt\0All Files (*.*)\0*.*\0\0"`
-pub const DEFAULT_NOTEPAD_FILTER: &str =
-    "Text Documents (*.txt)\0*.txt\0All Files (*.*)\0*.*\0\0";
+pub const DEFAULT_NOTEPAD_FILTER: &str = "Text Documents (*.txt)\0*.txt\0All Files (*.*)\0*.*\0\0";
 
 /// Dialog error representation.
 #[derive(Debug, PartialEq, Eq)]
@@ -39,7 +38,11 @@ impl fmt::Display for SaveDialogError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::CommonDialogError(code) => {
-                write!(f, "Dialog internal error (CommDlgExtendedError: 0x{:08X})", code)
+                write!(
+                    f,
+                    "Dialog internal error (CommDlgExtendedError: 0x{:08X})",
+                    code
+                )
             }
             Self::InvalidEncoding => write!(f, "Invalid UTF-16 encoding in selected path"),
         }

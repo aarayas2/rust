@@ -416,16 +416,18 @@ impl Cursors {
         let mut deduped: Vec<(CursorId, Cursor)> = Vec::with_capacity(self.cursors.len());
         for (id, cursor) in self.cursors.drain(..) {
             if let Some((prev_id, prev_cursor)) = deduped.last_mut() {
-                let same_pos = prev_cursor.position == cursor.position
-                    && prev_cursor.anchor == cursor.anchor;
-                let overlapping_ranges = match (prev_cursor.selection_range(), cursor.selection_range()) {
-                    (Some(r1), Some(r2)) => r1.start < r2.end && r2.start < r1.end,
-                    _ => false,
-                };
+                let same_pos =
+                    prev_cursor.position == cursor.position && prev_cursor.anchor == cursor.anchor;
+                let overlapping_ranges =
+                    match (prev_cursor.selection_range(), cursor.selection_range()) {
+                        (Some(r1), Some(r2)) => r1.start < r2.end && r2.start < r1.end,
+                        _ => false,
+                    };
 
                 if same_pos || overlapping_ranges {
                     if overlapping_ranges {
-                        let merged_start = prev_cursor.selection_start().min(cursor.selection_start());
+                        let merged_start =
+                            prev_cursor.selection_start().min(cursor.selection_start());
                         let merged_end = prev_cursor.selection_end().max(cursor.selection_end());
                         prev_cursor.anchor = Some(merged_start);
                         prev_cursor.position = merged_end;
@@ -631,7 +633,8 @@ impl MultiCursorEditor {
         if self.undo_stack.len() >= MAX_UNDO_STEPS {
             self.undo_stack.remove(0);
         }
-        self.undo_stack.push((self.text.clone(), self.cursors.clone()));
+        self.undo_stack
+            .push((self.text.clone(), self.cursors.clone()));
     }
 
     /// Restores the most recent undo snapshot if available.
@@ -650,13 +653,19 @@ impl MultiCursorEditor {
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
-    
+
     pub fn get_undo_stack(&self) -> Vec<String> {
-        self.undo_stack.iter().map(|(text, _)| text.clone()).collect()
+        self.undo_stack
+            .iter()
+            .map(|(text, _)| text.clone())
+            .collect()
     }
-    
+
     pub fn set_undo_stack(&mut self, stack: Vec<String>) {
-        self.undo_stack = stack.into_iter().map(|text| (text, Cursors::new())).collect();
+        self.undo_stack = stack
+            .into_iter()
+            .map(|text| (text, Cursors::new()))
+            .collect();
     }
 
     /// Returns the number of lines in the document (always at least 1).
@@ -862,7 +871,8 @@ impl MultiCursorEditor {
             .unwrap_or(range.end);
 
         // Search forward from `search_start`, then wrap around from the start of the buffer
-        let next_match = self.find_unselected_match(&needle, search_start..self.text.len(), &existing_ranges)
+        let next_match = self
+            .find_unselected_match(&needle, search_start..self.text.len(), &existing_ranges)
             .or_else(|| self.find_unselected_match(&needle, 0..search_start, &existing_ranges))?;
 
         let new_cursor = Cursor::with_selection(next_match.start, next_match.end);
@@ -1118,11 +1128,8 @@ impl MultiCursorEditor {
         let total_lines = ranges.len();
 
         // Snapshot cursor states first to avoid simultaneous borrow of `self` and `self.cursors`
-        let snapshots: Vec<(CursorId, Cursor)> = self
-            .cursors
-            .iter()
-            .map(|(id, c)| (id, c.clone()))
-            .collect();
+        let snapshots: Vec<(CursorId, Cursor)> =
+            self.cursors.iter().map(|(id, c)| (id, c.clone())).collect();
 
         let mut updated: Vec<(CursorId, Cursor)> = Vec::with_capacity(snapshots.len());
 
@@ -1194,9 +1201,7 @@ impl MultiCursorEditor {
                 }
                 MoveDirection::End => {
                     let pos_2d = self.byte_to_2d(cursor.position);
-                    let line_end = ranges
-                        .get(pos_2d.line)
-                        .map_or(self.text.len(), |r| r.end);
+                    let line_end = ranges.get(pos_2d.line).map_or(self.text.len(), |r| r.end);
                     cursor.move_to(line_end, extend_selection);
                     let end_col = self.byte_to_2d(line_end).column;
                     cursor.sticky_column = Some(end_col);
@@ -1300,7 +1305,8 @@ impl MultiCursorEditor {
         for edit in edits {
             let old_len = edit.replace_range.len() as isize;
             let new_len = edit.replacement.len() as isize;
-            let shifted_start = (edit.replace_range.start as isize + cumulative_delta).max(0) as usize;
+            let shifted_start =
+                (edit.replace_range.start as isize + cumulative_delta).max(0) as usize;
             let new_cursor_pos = shifted_start + edit.replacement.len();
             cumulative_delta += new_len - old_len;
 

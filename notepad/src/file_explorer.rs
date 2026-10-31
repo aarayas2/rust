@@ -54,8 +54,26 @@ const EXCLUDED_DIRS: &[&str] = &[
 
 /// Excluded file extensions modeled after Sublime Text's `file_exclude_patterns` / `binary_file_patterns`.
 const EXCLUDED_EXTENSIONS: &[&str] = &[
-    "pyc", "pyo", "exe", "dll", "obj", "o", "a", "lib", "so", "dylib", "ncb", "sdf", "suo", "pdb",
-    "idb", "DS_Store", "class", "psd", "db", "sublime-workspace",
+    "pyc",
+    "pyo",
+    "exe",
+    "dll",
+    "obj",
+    "o",
+    "a",
+    "lib",
+    "so",
+    "dylib",
+    "ncb",
+    "sdf",
+    "suo",
+    "pdb",
+    "idb",
+    "DS_Store",
+    "class",
+    "psd",
+    "db",
+    "sublime-workspace",
 ];
 
 /// Hierarchical filesystem node inside `FileExplorer`.
@@ -186,7 +204,10 @@ impl FileExplorer {
             return Err(format!("Folder does not exist: {}", folder_path.display()));
         }
         if !folder_path.is_dir() {
-            return Err(format!("Path is not a directory: {}", folder_path.display()));
+            return Err(format!(
+                "Path is not a directory: {}",
+                folder_path.display()
+            ));
         }
 
         self.root_path = Some(folder_path.clone());
@@ -278,10 +299,7 @@ impl FileExplorer {
             },
             notify::Config::default(),
         ) {
-            if watcher
-                .watch(folder_path, RecursiveMode::Recursive)
-                .is_ok()
-            {
+            if watcher.watch(folder_path, RecursiveMode::Recursive).is_ok() {
                 self.watcher = Some(watcher);
                 self.watch_rx = Some(rx);
             }
@@ -676,10 +694,8 @@ mod tests {
 
     #[test]
     fn test_open_folder_populates_tree_and_filters_excluded_dirs() {
-        let temp_dir = std::env::temp_dir().join(format!(
-            "notepad_explorer_test_{}",
-            std::process::id()
-        ));
+        let temp_dir =
+            std::env::temp_dir().join(format!("notepad_explorer_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&temp_dir);
         fs::create_dir_all(temp_dir.join("src")).expect("create src");
         fs::create_dir_all(temp_dir.join(".git")).expect("create .git");

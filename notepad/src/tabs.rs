@@ -21,11 +21,10 @@ use crate::theme::{RgbColor, Theme};
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush,
-    DeleteDC, DeleteObject, DrawTextW, FillRect, LineTo, MoveToEx, SelectObject, SetBkMode,
-    SetTextColor, DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    FONT_CHARSET, FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, HDC, PS_SOLID,
-    TRANSPARENT,
+    CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW, CreatePen, CreateSolidBrush, DeleteDC,
+    DeleteObject, DrawTextW, FillRect, LineTo, MoveToEx, SelectObject, SetBkMode, SetTextColor,
+    DT_CENTER, DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, FONT_CHARSET,
+    FONT_CLIP_PRECISION, FONT_OUTPUT_PRECISION, FONT_QUALITY, HDC, PS_SOLID, TRANSPARENT,
 };
 
 /// Height of the Sublime-style tab bar in pixels (`Default.sublime-theme`: `tab_height: 32`).
@@ -124,12 +123,7 @@ impl Tab {
         let base = if self.path.is_some() {
             self.title.clone()
         } else {
-            let first_line = self
-                .content
-                .lines()
-                .next()
-                .map(str::trim)
-                .unwrap_or("");
+            let first_line = self.content.lines().next().map(str::trim).unwrap_or("");
             if !first_line.is_empty() {
                 let snippet: String = first_line.chars().take(24).collect();
                 snippet
@@ -499,10 +493,7 @@ impl TabManager {
         let (tab_rects, new_btn) = self.compute_layout(bar_left, bar_right);
         for r in &tab_rects {
             if x >= r.left && x < r.right && y >= r.top && y < r.bottom {
-                if x >= r.close_left
-                    && x < r.close_right
-                    && y >= r.close_top
-                    && y < r.close_bottom
+                if x >= r.close_left && x < r.close_right && y >= r.close_top && y < r.close_bottom
                 {
                     return Some(TabHitTarget::TabClose(r.index));
                 }
@@ -664,7 +655,9 @@ impl TabManager {
                 } else if tab.is_dirty {
                     accent_col
                 } else {
-                    theme.gutter_foreground_highlight.blend(theme.gutter_foreground, 50, 100)
+                    theme
+                        .gutter_foreground_highlight
+                        .blend(theme.gutter_foreground, 50, 100)
                 };
                 let _ = SetTextColor(mem_dc, text_col.to_colorref());
 

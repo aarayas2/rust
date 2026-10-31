@@ -127,7 +127,13 @@ impl SyntaxRegistry {
         for path in paths {
             let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
             let loader_id = path.to_string_lossy().to_string();
-            Self::add_syntax_str(&mut builder, &mut definitions, &mut loaded_names, &raw, &loader_id);
+            Self::add_syntax_str(
+                &mut builder,
+                &mut definitions,
+                &mut loaded_names,
+                &raw,
+                &loader_id,
+            );
         }
 
         // Ensure the 3 core languages are always present even if a directory was partial
@@ -136,7 +142,13 @@ impl SyntaxRegistry {
             (EMBEDDED_JS_SYNTAX, "embedded:JavaScript.sublime-syntax"),
             (EMBEDDED_PYTHON_SYNTAX, "embedded:Python.sublime-syntax"),
         ] {
-            Self::add_syntax_str(&mut builder, &mut definitions, &mut loaded_names, raw, loader_id);
+            Self::add_syntax_str(
+                &mut builder,
+                &mut definitions,
+                &mut loaded_names,
+                raw,
+                loader_id,
+            );
         }
 
         let syntax_set = builder.build();
@@ -164,10 +176,22 @@ impl SyntaxRegistry {
 
         for (raw, loader_id) in [
             (EMBEDDED_RUST_SYNTAX, "assets/syntaxes/Rust.sublime-syntax"),
-            (EMBEDDED_JS_SYNTAX, "assets/syntaxes/JavaScript.sublime-syntax"),
-            (EMBEDDED_PYTHON_SYNTAX, "assets/syntaxes/Python.sublime-syntax"),
+            (
+                EMBEDDED_JS_SYNTAX,
+                "assets/syntaxes/JavaScript.sublime-syntax",
+            ),
+            (
+                EMBEDDED_PYTHON_SYNTAX,
+                "assets/syntaxes/Python.sublime-syntax",
+            ),
         ] {
-            Self::add_syntax_str(&mut builder, &mut definitions, &mut loaded_names, raw, loader_id);
+            Self::add_syntax_str(
+                &mut builder,
+                &mut definitions,
+                &mut loaded_names,
+                raw,
+                loader_id,
+            );
         }
 
         let syntax_set = builder.build();
@@ -231,9 +255,7 @@ impl SyntaxRegistry {
             } else {
                 syn_def.file_extensions.clone()
             };
-            let scope = header
-                .scope
-                .unwrap_or_else(|| syn_def.scope.build_string());
+            let scope = header.scope.unwrap_or_else(|| syn_def.scope.build_string());
             let first_line = header
                 .first_line_match
                 .or_else(|| syn_def.first_line_match.clone());

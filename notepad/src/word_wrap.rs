@@ -19,12 +19,13 @@
 
 use crate::file_io::{get_edit_text, is_edit_modified, set_edit_modified, set_edit_text};
 use crate::menu::EM_GETSEL;
+use crate::scrollbar::apply_dark_scrollbar;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CheckMenuItem, CreateWindowExW, DestroyWindow, GetClientRect, GetSubMenu, SendMessageW,
-    HMENU, MENU_ITEM_FLAGS, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, WINDOW_EX_STYLE, WINDOW_STYLE,
+    CheckMenuItem, CreateWindowExW, DestroyWindow, GetClientRect, GetSubMenu, SendMessageW, HMENU,
+    MENU_ITEM_FLAGS, MF_BYCOMMAND, MF_CHECKED, MF_UNCHECKED, WINDOW_EX_STYLE, WINDOW_STYLE,
     WM_GETFONT, WM_SETFONT,
 };
 
@@ -236,6 +237,7 @@ pub fn recreate_edit_control(
 
     // 3. Create replacement Edit control with the new WordWrap style
     let new_edit = create_edit_control(hwnd_main, hinstance, width, height, new_wrap)?;
+    apply_dark_scrollbar(new_edit);
 
     // 4. Destroy the old Edit control and restore state onto the new handle
     unsafe {
@@ -283,9 +285,6 @@ mod tests {
         let new_state = manager.toggle();
         assert_eq!(new_state, WordWrap::Enabled);
         assert_eq!(manager.state().menu_check_flag(), MF_CHECKED);
-        assert_eq!(
-            manager.state().edit_window_style(),
-            NOTEPAD_BASE_EDIT_STYLE
-        );
+        assert_eq!(manager.state().edit_window_style(), NOTEPAD_BASE_EDIT_STYLE);
     }
 }

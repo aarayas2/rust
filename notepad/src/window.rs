@@ -49,6 +49,7 @@ use crate::menu::{
     ID_VIEW_SYNTAX_PYTHON, ID_VIEW_SYNTAX_RUST, ID_VIEW_TOGGLE_SIDEBAR,
 };
 use crate::save_dialog::{OpenFileDialog, SaveFileDialog};
+use crate::scrollbar::apply_dark_scrollbar;
 use crate::tabs::{TabHitTarget, TabManager, TAB_BAR_HEIGHT};
 use crate::theme::{ColorScheme, GutterLayout, Theme, ThemePreset, ThemeRegistry};
 use crate::word_wrap::{create_edit_control, WordWrap, WordWrapManager, ID_FORMAT_WORDWRAP};
@@ -74,14 +75,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadIconW, MessageBoxW, MoveWindow, PostMessageW, PostQuitMessage, RegisterClassExW,
     SendMessageW, SetCursor, SetTimer, SetWindowLongPtrW, SetWindowTextW, ShowWindow,
     TrackPopupMenu, CS_DBLCLKS, CW_USEDEFAULT, GWLP_USERDATA, GWLP_WNDPROC, HMENU, IDC_ARROW,
-    IDC_IBEAM, IDC_SIZEWE, IDI_APPLICATION, IDNO, IDYES, MB_ICONINFORMATION, MB_ICONWARNING,
-    MB_OK, MB_YESNOCANCEL, MF_SEPARATOR, MF_STRING, SW_HIDE, SW_SHOW, TPM_LEFTALIGN,
-    TPM_RETURNCMD, TPM_TOPALIGN, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_CLEAR, WM_CLOSE,
-    WM_COMMAND, WM_COPY, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_CUT, WM_DESTROY, WM_ERASEBKGND,
-    WM_GETFONT, WM_INITMENU, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MBUTTONDOWN, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_RBUTTONUP, WM_SETCURSOR,
-    WM_SETFOCUS, WM_SETFONT, WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL,
-    WNDCLASSEXW, WNDPROC, WS_CHILD, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    IDC_IBEAM, IDC_SIZEWE, IDI_APPLICATION, IDNO, IDYES, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK,
+    MB_YESNOCANCEL, MF_SEPARATOR, MF_STRING, SW_HIDE, SW_SHOW, TPM_LEFTALIGN, TPM_RETURNCMD,
+    TPM_TOPALIGN, WINDOW_EX_STYLE, WINDOW_STYLE, WM_CHAR, WM_CLEAR, WM_CLOSE, WM_COMMAND, WM_COPY,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_CUT, WM_DESTROY, WM_ERASEBKGND, WM_GETFONT, WM_INITMENU,
+    WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_PASTE, WM_RBUTTONUP, WM_SETCURSOR, WM_SETFOCUS, WM_SETFONT,
+    WM_SIZE, WM_SYSCHAR, WM_SYSKEYDOWN, WM_TIMER, WM_VSCROLL, WNDCLASSEXW, WNDPROC, WS_CHILD,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
 /// Window Class Name (`0x14002B828`: `"Notepad"`).
@@ -177,7 +178,8 @@ impl NotepadAppState {
             word_wrap: self.word_wrap.state(),
             status_bar_visible: self.status_bar_visible,
             line_numbers_visible: self.line_numbers_visible,
-            sidebar_visible: self.file_explorer.is_visible && self.file_explorer.root_path.is_some(),
+            sidebar_visible: self.file_explorer.is_visible
+                && self.file_explorer.root_path.is_some(),
             theme_preset: self.theme_preset,
             show_full_path: self.show_full_path,
             active_syntax_cmd,
@@ -302,7 +304,11 @@ impl NotepadAppState {
             }
             let dpi = GetDeviceCaps(Some(hdc), LOGPIXELSY);
             let _ = ReleaseDC(Some(self.hwnd_main), hdc);
-            if dpi > 0 { dpi } else { 96 }
+            if dpi > 0 {
+                dpi
+            } else {
+                96
+            }
         }
     }
 
@@ -520,7 +526,8 @@ impl NotepadAppState {
             if detected.name != "Plain Text" {
                 let name = detected.name.clone();
                 self.tab_manager.active_tab_mut().syntax_name = name.clone();
-                self.highlight_cache.set_syntax_and_text(&name, &current_text);
+                self.highlight_cache
+                    .set_syntax_and_text(&name, &current_text);
             }
         }
 
@@ -662,15 +669,15 @@ impl NotepadAppState {
             }
 
             let text = get_edit_text(self.hwnd_edit);
-            let prefix: String = text.encode_utf16().take(sel_end as usize).fold(
-                String::new(),
-                |mut acc, ch| {
-                    if let Some(c) = char::from_u32(ch as u32) {
-                        acc.push(c);
-                    }
-                    acc
-                },
-            );
+            let prefix: String =
+                text.encode_utf16()
+                    .take(sel_end as usize)
+                    .fold(String::new(), |mut acc, ch| {
+                        if let Some(c) = char::from_u32(ch as u32) {
+                            acc.push(c);
+                        }
+                        acc
+                    });
 
             let line = prefix.matches('\n').count() + 1;
             let col = prefix
@@ -778,8 +785,10 @@ impl NotepadAppState {
     }
 
     pub fn save_session_to_disk(&mut self) {
+        use crate::session::{
+            get_session_dir, get_session_file, Session, SessionBounds, SessionTab, SessionWindow,
+        };
         use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
-        use crate::session::{Session, SessionWindow, SessionTab, SessionBounds, get_session_file, get_session_dir};
         let mut session = Session::default();
         let mut window = SessionWindow::default();
 
@@ -793,7 +802,7 @@ impl NotepadAppState {
             w: rc.right - rc.left,
             h: rc.bottom - rc.top,
         };
-        
+
         if let Some(ref root) = self.file_explorer.root_path {
             window.folders.push(root.clone());
         }
@@ -826,11 +835,15 @@ impl NotepadAppState {
                 cursor: tab.selection,
                 scroll: tab.scroll_line,
                 backup_id,
-                content_from_backup: if tab.is_dirty || tab.path.is_none() { Some(true) } else { None },
+                content_from_backup: if tab.is_dirty || tab.path.is_none() {
+                    Some(true)
+                } else {
+                    None
+                },
                 undo_history: tab.multi_cursor.get_undo_stack(),
             });
         }
-        
+
         unsafe {
             if !self.hwnd_edit.is_invalid() && !self.hwnd_status.is_invalid() {
                 let mut rc_main = RECT::default();
@@ -1372,8 +1385,7 @@ impl NotepadAppState {
         if self.hwnd_edit.is_invalid() {
             return;
         }
-        if !self.multi_cursor.cursors.is_multi()
-            && !self.multi_cursor.cursors.has_block_selection()
+        if !self.multi_cursor.cursors.is_multi() && !self.multi_cursor.cursors.has_block_selection()
         {
             return;
         }
@@ -1412,14 +1424,10 @@ impl NotepadAppState {
                     let virtual_sc = start_col.saturating_sub(line_char_len);
                     let virtual_ec = end_col.saturating_sub(line_char_len);
 
-                    let sc_byte_rel: usize = line_chars[..actual_sc]
-                        .iter()
-                        .map(|c| c.len_utf8())
-                        .sum();
-                    let ec_byte_rel: usize = line_chars[..actual_ec]
-                        .iter()
-                        .map(|c| c.len_utf8())
-                        .sum();
+                    let sc_byte_rel: usize =
+                        line_chars[..actual_sc].iter().map(|c| c.len_utf8()).sum();
+                    let ec_byte_rel: usize =
+                        line_chars[..actual_ec].iter().map(|c| c.len_utf8()).sum();
 
                     let (base_sc_x, line_y) =
                         self.char_byte_to_client_xy(line_range.start + sc_byte_rel, line_height);
@@ -1888,7 +1896,9 @@ pub unsafe extern "system" fn edit_subclass_proc(
                     if current_byte != origin_byte
                         || state.multi_cursor.cursors.has_block_selection()
                     {
-                        state.multi_cursor.handle_alt_drag(origin_byte, current_byte);
+                        state
+                            .multi_cursor
+                            .handle_alt_drag(origin_byte, current_byte);
                         state.sync_to_hwnd_edit(false);
                         return LRESULT(0);
                     }
@@ -2221,13 +2231,13 @@ pub fn create_notepad_window(
     // 3. Create Child "Edit" Control (0x1400125E8)
     let initial_wrap = WordWrap::Disabled;
     let hwnd_edit = create_edit_control(hwnd_main, hinstance, client_w, edit_h, initial_wrap)?;
+    apply_dark_scrollbar(hwnd_edit);
 
     // 4. Create Child Status Bar (0x140013715)
     let status_class: Vec<u16> = "STATIC\0".encode_utf16().collect();
-    let status_text: Vec<u16> =
-        "  Ln 1, Col 1   |   Tab 1/1   |   100%   |   UTF-8\0"
-            .encode_utf16()
-            .collect();
+    let status_text: Vec<u16> = "  Ln 1, Col 1   |   Tab 1/1   |   100%   |   UTF-8\0"
+        .encode_utf16()
+        .collect();
     let hwnd_status = unsafe {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -2366,7 +2376,10 @@ pub fn create_notepad_window(
                             .to_string();
 
                         let syntax_name = crate::highlight::GLOBAL_SYNTAX_REGISTRY
-                            .detect_syntax(tab.file.as_deref(), content.lines().next().unwrap_or(""))
+                            .detect_syntax(
+                                tab.file.as_deref(),
+                                content.lines().next().unwrap_or(""),
+                            )
                             .name
                             .clone();
 
@@ -2388,15 +2401,16 @@ pub fn create_notepad_window(
                         };
                         app_state.tab_manager.tabs.push(new_tab);
                     }
-                    
+
                     if window.layout == Some("split".to_string()) {
                         // Just flag the feature requirement, layout restore logic goes here
                         // We already restore size and bounds which implicitly covers basic layouts.
                     }
-                    
+
                     if !app_state.tab_manager.tabs.is_empty() {
-                        app_state.tab_manager.active_index =
-                            window.active_tab_index.min(app_state.tab_manager.tabs.len() - 1);
+                        app_state.tab_manager.active_index = window
+                            .active_tab_index
+                            .min(app_state.tab_manager.tabs.len() - 1);
                         app_state.tab_manager.next_id += window.tabs.len() as u64;
                     }
                 }

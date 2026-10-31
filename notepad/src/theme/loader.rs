@@ -50,7 +50,10 @@ struct RawSublimeRule {
 /// Resolves `var(variable_name)` references in a color string using the theme's `variables` map.
 pub fn resolve_variable(raw: &str, variables: &HashMap<String, String>) -> String {
     let trimmed = raw.trim();
-    if let Some(inner) = trimmed.strip_prefix("var(").and_then(|s| s.strip_suffix(')')) {
+    if let Some(inner) = trimmed
+        .strip_prefix("var(")
+        .and_then(|s| s.strip_suffix(')'))
+    {
         let key = inner.trim();
         if let Some(val) = variables.get(key) {
             return val.trim().to_string();
@@ -242,10 +245,7 @@ pub fn parse_sublime_color_scheme_str(
 }
 
 /// Parses a `.tmTheme` XML Property List string into a [`ColorScheme`].
-pub fn parse_tmtheme_str(
-    xml_src: &str,
-    static_name: &'static str,
-) -> Result<ColorScheme, String> {
+pub fn parse_tmtheme_str(xml_src: &str, static_name: &'static str) -> Result<ColorScheme, String> {
     let val: plist::Value = plist::from_bytes(xml_src.as_bytes())
         .map_err(|e| format!("Failed to parse .tmTheme XML plist: {e}"))?;
     let root_dict = val

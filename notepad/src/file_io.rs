@@ -31,7 +31,9 @@ use std::io;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
 use windows::core::{PCWSTR, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{
+    CloseHandle, GENERIC_READ, GENERIC_WRITE, HANDLE, HWND, LPARAM, WPARAM,
+};
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, GetFileSizeEx, ReadFile, SetEndOfFile, WriteFile, FILE_ATTRIBUTE_NORMAL,
     FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, OPEN_EXISTING,
@@ -284,7 +286,10 @@ pub fn set_edit_text(hwnd_edit: HWND, text: &str) {
         return;
     }
     let normalized = normalize_crlf(text);
-    let wide: Vec<u16> = normalized.encode_utf16().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = normalized
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         let _ = SetWindowTextW(hwnd_edit, PCWSTR(wide.as_ptr()));
         // Clear dirty state: SendMessageW(hwnd_edit, EM_SETMODIFY, 0, 0)

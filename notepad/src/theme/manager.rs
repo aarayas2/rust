@@ -60,8 +60,10 @@ impl ThemeRegistry {
         let breakers_scheme = ColorScheme::from_theme(Theme::breakers_light());
         let classic_scheme = ColorScheme::from_theme(Theme::classic_notepad());
 
-        self.schemes.push((ThemePreset::MarianaDark, mariana_scheme));
-        self.schemes.push((ThemePreset::MonokaiDark, monokai_scheme));
+        self.schemes
+            .push((ThemePreset::MarianaDark, mariana_scheme));
+        self.schemes
+            .push((ThemePreset::MonokaiDark, monokai_scheme));
         self.schemes
             .push((ThemePreset::BreakersLight, breakers_scheme));
         self.schemes
@@ -72,10 +74,7 @@ impl ThemeRegistry {
             if let Ok(entries) = fs::read_dir(dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    let file_name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("");
+                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                     if file_name.eq_ignore_ascii_case("Mariana.sublime-color-scheme")
                         || file_name.eq_ignore_ascii_case("Monokai.tmTheme")
                     {
@@ -152,7 +151,10 @@ pub(crate) fn default_light_scope_rules() -> Vec<ScopeRule> {
     vec![
         ScopeRule {
             name: "Comments".to_string(),
-            scope_selectors: vec!["comment".to_string(), "punctuation.definition.comment".to_string()],
+            scope_selectors: vec![
+                "comment".to_string(),
+                "punctuation.definition.comment".to_string(),
+            ],
             style: Style {
                 foreground: RgbColor::from_hex(0x6E7781),
                 background: None,
@@ -264,7 +266,10 @@ pub(crate) fn default_dark_scope_rules() -> Vec<ScopeRule> {
     vec![
         ScopeRule {
             name: "Comments".to_string(),
-            scope_selectors: vec!["comment".to_string(), "punctuation.definition.comment".to_string()],
+            scope_selectors: vec![
+                "comment".to_string(),
+                "punctuation.definition.comment".to_string(),
+            ],
             style: Style {
                 foreground: RgbColor::from_hex(0x738294),
                 background: None,

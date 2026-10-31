@@ -9,9 +9,7 @@
 pub mod registry;
 pub mod tokenizer;
 
-pub use registry::{
-    RegisteredSyntax, SyntaxDefinition, SyntaxRegistry, GLOBAL_SYNTAX_REGISTRY,
-};
+pub use registry::{RegisteredSyntax, SyntaxDefinition, SyntaxRegistry, GLOBAL_SYNTAX_REGISTRY};
 pub use tokenizer::{
     apply_scope_ops, HighlightToken, LineLexerState, SyntectTokenizer, TreeSitterFallback,
 };
@@ -29,7 +27,11 @@ pub trait Highlighter {
     fn set_syntax(&mut self, registry: &SyntaxRegistry, syntax_name: &str);
 
     /// Ensures lines `0..=end_line` are tokenized and returns the slice of per-line token vectors.
-    fn highlight_up_to(&mut self, registry: &SyntaxRegistry, end_line: usize) -> &[Vec<HighlightToken>];
+    fn highlight_up_to(
+        &mut self,
+        registry: &SyntaxRegistry,
+        end_line: usize,
+    ) -> &[Vec<HighlightToken>];
 
     /// Invalidates cached line states starting at `from_line`.
     fn invalidate_from_line(&mut self, from_line: usize);
@@ -171,7 +173,8 @@ impl IncrementalHighlightCache {
             self.exit_states[self.valid_up_to_line - 1].clone()
         };
 
-        let can_converge = self.exit_states.len() == total_lines && self.line_tokens.len() == total_lines;
+        let can_converge =
+            self.exit_states.len() == total_lines && self.line_tokens.len() == total_lines;
 
         for line_idx in self.valid_up_to_line..=clamped_target {
             let rope_line = self.rope.line(line_idx);
@@ -226,7 +229,8 @@ impl IncrementalHighlightCache {
                 continue;
             }
             let ch = self.byte_at(pos) as char;
-            if matches!(ch, '(' | ')' | '{' | '}' | '[' | ']') && !self.is_byte_in_string_or_comment(pos)
+            if matches!(ch, '(' | ')' | '{' | '}' | '[' | ']')
+                && !self.is_byte_in_string_or_comment(pos)
             {
                 if let Some(partner) = self.scan_partner_bracket(pos, ch) {
                     let pair = if pos < partner {
@@ -363,14 +367,18 @@ mod tests {
 
         let line1 = cache.tokens_for_line(1).expect("line 1 tokens");
         assert!(line1.iter().any(|t| t.scope.contains("storage.type")));
-        assert!(line1.iter().any(|t| t.scope.contains("entity.name.function")));
+        assert!(line1
+            .iter()
+            .any(|t| t.scope.contains("entity.name.function")));
 
         // Line 3 is inside the multi-line block comment started on line 2
         let line3 = cache.tokens_for_line(3).expect("line 3 tokens");
         assert!(line3.iter().any(|t| t.scope.contains("comment.block")));
 
         let line4 = cache.tokens_for_line(4).expect("line 4 tokens");
-        assert!(line4.iter().any(|t| t.scope.contains("string.quoted.double")));
+        assert!(line4
+            .iter()
+            .any(|t| t.scope.contains("string.quoted.double")));
     }
 
     #[test]
@@ -381,7 +389,10 @@ mod tests {
         // Build a 10,500-line Rust source buffer
         let mut lines = Vec::with_capacity(10_500);
         for i in 0..10_500 {
-            lines.push(format!("pub fn item_{}(val: usize) -> usize {{ return val + {}; }}", i, i));
+            lines.push(format!(
+                "pub fn item_{}(val: usize) -> usize {{ return val + {}; }}",
+                i, i
+            ));
         }
         let doc = lines.join("\r\n");
         cache.sync_rope(&doc);
@@ -392,13 +403,14 @@ mod tests {
         let viewport_elapsed = t0.elapsed();
         assert!(
             viewport_elapsed.as_millis() < 50,
-            "Viewport tokenize took {:?}",
+            "!Viewport tokenize took {:?}",
             viewport_elapsed
         );
 
         // Full 10,500-line warm cache + single-line edit convergence must be < 16ms
         cache.ensure_highlighted_up_to(&reg, 10_499);
-        lines[500] = String::from("pub fn item_500_edited(val: usize) -> usize { return val + 999; }");
+        lines[500] =
+            String::from("pub fn item_500_edited(val: usize) -> usize { return val + 999; }");
         let edited_doc = lines.join("\r\n");
 
         let t1 = Instant::now();
