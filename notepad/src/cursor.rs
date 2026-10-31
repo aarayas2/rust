@@ -650,6 +650,14 @@ impl MultiCursorEditor {
     pub fn can_undo(&self) -> bool {
         !self.undo_stack.is_empty()
     }
+    
+    pub fn get_undo_stack(&self) -> Vec<String> {
+        self.undo_stack.iter().map(|(text, _)| text.clone()).collect()
+    }
+    
+    pub fn set_undo_stack(&mut self, stack: Vec<String>) {
+        self.undo_stack = stack.into_iter().map(|text| (text, Cursors::new())).collect();
+    }
 
     /// Returns the number of lines in the document (always at least 1).
     pub fn line_count(&self) -> usize {

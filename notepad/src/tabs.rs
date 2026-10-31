@@ -493,7 +493,7 @@ impl TabManager {
 
     /// Hit-tests client coordinates `(x, y)` against the tab bar spanning `[bar_left..bar_right, 0..TAB_BAR_HEIGHT]`.
     pub fn hit_test(&self, x: i32, y: i32, bar_left: i32, bar_right: i32) -> Option<TabHitTarget> {
-        if x < bar_left || x >= bar_right || y < 0 || y >= TAB_BAR_HEIGHT {
+        if x < bar_left || x >= bar_right || !(0..TAB_BAR_HEIGHT).contains(&y) {
             return None;
         }
         let (tab_rects, new_btn) = self.compute_layout(bar_left, bar_right);

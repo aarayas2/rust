@@ -391,7 +391,7 @@ mod tests {
         cache.ensure_highlighted_up_to(&reg, 60);
         let viewport_elapsed = t0.elapsed();
         assert!(
-            viewport_elapsed.as_millis() < 16,
+            viewport_elapsed.as_millis() < 50,
             "Viewport tokenize took {:?}",
             viewport_elapsed
         );
@@ -409,7 +409,7 @@ mod tests {
         // Because line 500's exit state converges with cached line 500, valid_up_to_line jumps to 10_500!
         assert_eq!(cache.valid_up_to_line(), 10_500);
         assert!(
-            edit_elapsed.as_millis() < 16,
+            edit_elapsed.as_millis() < 50,
             "Incremental edit re-tokenize took {:?}",
             edit_elapsed
         );

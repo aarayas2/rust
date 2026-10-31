@@ -777,6 +777,82 @@ impl NotepadAppState {
         }
     }
 
+    pub fn save_session_to_disk(&mut self) {
+        use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
+        use crate::session::{Session, SessionWindow, SessionTab, SessionBounds, get_session_file, get_session_dir};
+        let mut session = Session::default();
+        let mut window = SessionWindow::default();
+
+        let mut rc = RECT::default();
+        unsafe {
+            let _ = GetWindowRect(self.hwnd_main, &mut rc);
+        }
+        window.bounds = SessionBounds {
+            x: rc.left,
+            y: rc.top,
+            w: rc.right - rc.left,
+            h: rc.bottom - rc.top,
+        };
+        
+        if let Some(ref root) = self.file_explorer.root_path {
+            window.folders.push(root.clone());
+        }
+
+        let session_dir = get_session_dir();
+        let _ = std::fs::create_dir_all(&session_dir);
+
+        if let Ok(entries) = std::fs::read_dir(&session_dir) {
+            for entry in entries.flatten() {
+                if let Some(ext) = entry.path().extension() {
+                    if ext == "tmp" {
+                        let _ = std::fs::remove_file(entry.path());
+                    }
+                }
+            }
+        }
+
+        for (i, tab) in self.tab_manager.tabs.iter().enumerate() {
+            let mut backup_id = None;
+            if tab.is_dirty || tab.path.is_none() {
+                let id = format!("backup_{}_{}", std::process::id(), i);
+                let backup_path = session_dir.join(format!("{}.tmp", id));
+                if std::fs::write(&backup_path, &tab.content).is_ok() {
+                    backup_id = Some(id);
+                }
+            }
+            window.tabs.push(SessionTab {
+                file: tab.path.clone(),
+                is_dirty: tab.is_dirty,
+                cursor: tab.selection,
+                scroll: tab.scroll_line,
+                backup_id,
+                content_from_backup: if tab.is_dirty || tab.path.is_none() { Some(true) } else { None },
+                undo_history: tab.multi_cursor.get_undo_stack(),
+            });
+        }
+        
+        unsafe {
+            if !self.hwnd_edit.is_invalid() && !self.hwnd_status.is_invalid() {
+                let mut rc_main = RECT::default();
+                let mut rc_edit = RECT::default();
+                let _ = GetWindowRect(self.hwnd_main, &mut rc_main);
+                let _ = GetWindowRect(self.hwnd_edit, &mut rc_edit);
+                let edit_w = rc_edit.right - rc_edit.left;
+                let main_w = rc_main.right - rc_main.left;
+                if edit_w < main_w {
+                    window.layout = Some("split".to_string());
+                }
+            }
+        }
+
+        window.active_tab_index = self.tab_manager.active_index;
+        session.windows.push(window);
+
+        if let Ok(json) = serde_json::to_string_pretty(&session) {
+            let _ = std::fs::write(get_session_file(), json);
+        }
+    }
+
     /// Prompts the user to save changes if the document is modified (`CheckSave` at `0x14000C520`).
     /// Returns `true` if the caller may proceed, or `false` if the user cancelled.
     pub fn check_save(&mut self) -> bool {
@@ -899,6 +975,7 @@ impl NotepadAppState {
         }
         self.save_active_tab_state();
         if self.tab_manager.tabs[index].is_dirty {
+            let _hot_exit = crate::session::get_hot_exit_setting();
             self.tab_manager.switch_to(index);
             self.load_active_tab_state();
             if !self.check_save() {
@@ -2209,7 +2286,7 @@ pub fn create_notepad_window(
     };
     let initial_gutter = GutterLayout::compute(1, 8, GutterLayout::DEFAULT_MARGIN_PX, true);
 
-    let state = Box::new(NotepadAppState {
+    let mut app_state = NotepadAppState {
         hinstance,
         hwnd_main,
         hwnd_edit,
@@ -2237,18 +2314,112 @@ pub fn create_notepad_window(
         highlight_cache: IncrementalHighlightCache::new("Plain Text"),
         theme_registry,
         color_scheme: initial_color_scheme,
-    });
+    };
+
+    if crate::session::get_hot_exit_setting() {
+        let session_file = crate::session::get_session_file();
+        if let Ok(json) = std::fs::read_to_string(&session_file) {
+            if let Ok(session) = serde_json::from_str::<crate::session::Session>(&json) {
+                if let Some(window) = session.windows.first() {
+                    unsafe {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                            hwnd_main,
+                            Some(HWND::default()),
+                            window.bounds.x,
+                            window.bounds.y,
+                            window.bounds.w,
+                            window.bounds.h,
+                            windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
+                                | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+                        );
+                    }
+                    if let Some(folder) = window.folders.first() {
+                        let _ = app_state.open_folder_path(folder.clone());
+                    }
+
+                    app_state.tab_manager.tabs.clear();
+                    let session_dir = crate::session::get_session_dir();
+                    for (i, tab) in window.tabs.iter().enumerate() {
+                        let content = if let Some(true) = tab.content_from_backup {
+                            if let Some(ref backup_id) = tab.backup_id {
+                                let backup_path = session_dir.join(format!("{}.tmp", backup_id));
+                                std::fs::read_to_string(backup_path).unwrap_or_default()
+                            } else {
+                                String::new()
+                            }
+                        } else if let Some(ref p) = tab.file {
+                            if let Ok(file_doc) = crate::file_io::load_file_win32(p) {
+                                file_doc.text
+                            } else {
+                                String::new()
+                            }
+                        } else {
+                            String::new()
+                        };
+
+                        let title = tab
+                            .file
+                            .as_ref()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Untitled")
+                            .to_string();
+
+                        let syntax_name = crate::highlight::GLOBAL_SYNTAX_REGISTRY
+                            .detect_syntax(tab.file.as_deref(), content.lines().next().unwrap_or(""))
+                            .name
+                            .clone();
+
+                        let mut mc = MultiCursorEditor::new();
+                        mc.set_undo_stack(tab.undo_history.clone());
+
+                        let new_tab = crate::tabs::Tab {
+                            id: app_state.tab_manager.next_id + i as u64,
+                            path: tab.file.clone(),
+                            title,
+                            content,
+                            encoding: TextEncoding::Utf8,
+                            is_dirty: tab.is_dirty,
+                            is_preview: false,
+                            selection: tab.cursor,
+                            scroll_line: tab.scroll,
+                            multi_cursor: mc,
+                            syntax_name,
+                        };
+                        app_state.tab_manager.tabs.push(new_tab);
+                    }
+                    
+                    if window.layout == Some("split".to_string()) {
+                        // Just flag the feature requirement, layout restore logic goes here
+                        // We already restore size and bounds which implicitly covers basic layouts.
+                    }
+                    
+                    if !app_state.tab_manager.tabs.is_empty() {
+                        app_state.tab_manager.active_index =
+                            window.active_tab_index.min(app_state.tab_manager.tabs.len() - 1);
+                        app_state.tab_manager.next_id += window.tabs.len() as u64;
+                    }
+                }
+            }
+        }
+    }
+
+    let state = Box::new(app_state);
     let state_ptr = Box::into_raw(state);
     unsafe {
         SetWindowLongPtrW(hwnd_main, GWLP_USERDATA, state_ptr as isize);
         attach_edit_subclass(hwnd_edit, state_ptr);
         if let Some(state_ref) = state_ptr.as_mut() {
+            if !state_ref.tab_manager.tabs.is_empty() {
+                state_ref.load_active_tab_state();
+            }
             state_ref.apply_font_state();
         }
         if let Some(cmd) = show_cmd {
             let _ = ShowWindow(hwnd_main, cmd);
         }
         let _ = SetFocus(Some(hwnd_edit));
+        let _ = windows::Win32::Graphics::Gdi::UpdateWindow(hwnd_main);
     }
 
     Ok(hwnd_main)
@@ -3004,7 +3175,13 @@ pub unsafe extern "system" fn notepad_wnd_proc(
 
             // 0x14000EAC0: WM_CLOSE (0x0010) -> CheckSave + DestroyWindow
             WM_CLOSE => {
-                if state.check_save() {
+                let hot_exit = crate::session::get_hot_exit_setting();
+                if hot_exit {
+                    state.save_active_tab_state();
+                    state.save_session_to_disk();
+                }
+
+                if hot_exit || state.check_save() {
                     if !state.hwnd_edit.is_invalid() {
                         detach_edit_subclass(state.hwnd_edit, state.edit_prev_wndproc);
                     }

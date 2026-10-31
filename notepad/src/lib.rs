@@ -60,3 +60,4 @@ pub use theme::{
 };
 pub use window::{create_notepad_window, notepad_wnd_proc, register_notepad_class, NotepadAppState};
 pub use word_wrap::{WordWrap, WordWrapManager};
+pub mod session;
