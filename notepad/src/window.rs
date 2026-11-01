@@ -2697,6 +2697,8 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                                     }
                                 }
                             }
+                            state.load_active_tab_state();
+                            state.update_window_title();
 
                             state.render_chrome_direct();
                             state.update_status_bar();
