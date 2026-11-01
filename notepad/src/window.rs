@@ -2649,7 +2649,7 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                         // Check if dragged tab is pulled out of the client area
                         let is_outside =
                             !(-20..=TAB_BAR_HEIGHT + 20).contains(&y) || x < -20 || x > client_w + 20;
-                        if is_outside {
+                        if is_outside && state.tab_manager.tabs.len() > 1 {
                             state.tab_manager.dragging_tab = None;
                             let _ = ReleaseCapture();
 
@@ -2703,14 +2703,6 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                             state.render_chrome_direct();
                             state.update_status_bar();
                             return LRESULT(0);
-                        }
-
-                        // Check if dragged tab is pulled out of the client area
-                        if !(-TAB_BAR_HEIGHT..=TAB_BAR_HEIGHT * 2).contains(&y) || x < 0 || x > client_w {
-                            // Create a new window for this tab
-                            // We need to implement this
-                            state.tab_manager.dragging_tab = None;
-                            let _ = ReleaseCapture();
                         }
 
                         let (tab_rects, _) = state.tab_manager.compute_layout(sidebar_w, client_w);
