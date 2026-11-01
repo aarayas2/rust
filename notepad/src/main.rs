@@ -760,6 +760,11 @@ fn main() {
                         for session_tab in window_state.tabs {
                             let mut tab = notepad_win32::tabs::Tab::new_untitled(next_id);
                             if let Some(file) = session_tab.file {
+                                tab.title = file
+                                    .file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("Untitled")
+                                    .to_string();
                                 tab.path = Some(file);
                             }
                             tab.is_dirty = session_tab.is_dirty;
