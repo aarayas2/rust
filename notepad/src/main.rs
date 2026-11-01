@@ -432,7 +432,7 @@ fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), Stri
 
         // 10. Test Multi-Tab (`File > New`, switching, reordering, dirty `*`, `Ctrl+Tab`, closing)
         //     and `File > Open Folder` (`D:\test` -> left pane tree -> preview vs pinned tab)
-        let test_folder = PathBuf::from(r"D:\test");
+        let test_folder = PathBuf::from("test_files");
         let created_d_test = !test_folder.exists();
         let _ = std::fs::create_dir_all(&test_folder);
         let file_alpha = test_folder.join("alpha.txt");
@@ -696,13 +696,111 @@ fn main() {
     }
 
     // Standard GUI launch (WinMain at 0x140010280)
-    let hwnd: HWND = match create_notepad_window(hinstance, Some(SW_SHOWDEFAULT)) {
+    // We want to check the session to see if there are multiple windows.
+    // If so, create them. `create_notepad_window` handles creating the first window and restoring its session state.
+    // We should spawn the remaining windows if they exist in the session.
+    
+    let mut _initial_hwnd: HWND = HWND::default();
+    
+    let session_file = notepad_win32::session::get_session_file();
+    let mut _num_windows_to_spawn = 1;
+    let mut session_data = None;
+    if let Ok(json) = std::fs::read_to_string(&session_file) {
+        if let Ok(session) = serde_json::from_str::<notepad_win32::session::Session>(&json) {
+            _num_windows_to_spawn = session.windows.len().max(1);
+            session_data = Some(session);
+        }
+    }
+
+    let hwnd = match create_notepad_window(hinstance, Some(SW_SHOWDEFAULT)) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("Failed to initialize Notepad window: {}", e);
             std::process::exit(1);
         }
     };
+    _initial_hwnd = hwnd;
+    
+    if let Some(session) = session_data {
+        for (i, window_state) in session.windows.into_iter().enumerate() {
+            let new_hwnd = if i == 0 {
+                _initial_hwnd
+            } else {
+                match create_notepad_window(hinstance, Some(SW_SHOWDEFAULT)) {
+                    Ok(h) => h,
+                    Err(_) => continue,
+                }
+            };
+            
+            if !new_hwnd.is_invalid() {
+
+                unsafe {
+                    let state_ptr = GetWindowLongPtrW(new_hwnd, GWLP_USERDATA) as *mut notepad_win32::window::NotepadAppState;
+                    if let Some(state) = state_ptr.as_mut() {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                            new_hwnd,
+                            Some(HWND::default()),
+                            window_state.bounds.x,
+                            window_state.bounds.y,
+                            window_state.bounds.w,
+                            window_state.bounds.h,
+                            windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
+                                | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
+                        );
+                        if let Some(folder) = window_state.folders.first() {
+                            let _ = state.open_folder_path(folder.clone());
+                        }
+                        
+                        // We also need to restore tabs for this window
+                        state.tab_manager.tabs.clear();
+                        state.tab_manager.mru_stack.clear();
+                        
+                        let session_dir = notepad_win32::session::get_session_dir();
+                        let mut next_id = 1;
+                        for session_tab in window_state.tabs {
+                            let mut tab = notepad_win32::tabs::Tab::new_untitled(next_id);
+                            if let Some(file) = session_tab.file {
+                                tab.path = Some(file);
+                            }
+                            tab.is_dirty = session_tab.is_dirty;
+                            tab.selection = session_tab.cursor;
+                            tab.scroll_line = session_tab.scroll;
+                            if let Some(backup_id) = session_tab.backup_id {
+                                let mut tmp_path = session_dir.clone();
+                                tmp_path.push(format!("{}.tmp", backup_id));
+                                if let Ok(content) = std::fs::read_to_string(&tmp_path) {
+                                    tab.content = content;
+                                }
+                            } else if let Some(ref path) = tab.path {
+                                if let Ok(doc) = notepad_win32::file_io::load_file_win32(path) {
+                                    tab.content = doc.text;
+                                    tab.encoding = doc.encoding;
+                                }
+                            }
+                            tab.syntax_name = notepad_win32::highlight::GLOBAL_SYNTAX_REGISTRY
+                                .detect_syntax(tab.path.as_deref(), tab.content.lines().next().unwrap_or(""))
+                                .name
+                                .clone();
+                            state.tab_manager.tabs.push(tab);
+                            state.tab_manager.mru_stack.push(next_id);
+                            next_id += 1;
+                        }
+                        if state.tab_manager.tabs.is_empty() {
+                            state.tab_manager.tabs.push(notepad_win32::tabs::Tab::new_untitled(next_id));
+                            state.tab_manager.mru_stack.push(next_id);
+                            next_id += 1;
+                        }
+                        state.tab_manager.next_id = next_id;
+                        state.tab_manager.active_index = window_state.active_tab_index.min(state.tab_manager.tabs.len().saturating_sub(1));
+                        
+                        state.load_active_tab_state();
+                        state.render_chrome_direct();
+                    }
+                }
+            }
+        }
+    }
+
 
     // If a file or folder path was passed on the command line, open it immediately
     if let Some(path_arg) = args.get(1).filter(|a| !a.starts_with("--")) {

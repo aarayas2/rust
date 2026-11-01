@@ -53,7 +53,18 @@ use crate::scrollbar::apply_dark_scrollbar;
 use crate::tabs::{TabHitTarget, TabManager, TAB_BAR_HEIGHT};
 use crate::theme::{ColorScheme, GutterLayout, Theme, ThemePreset, ThemeRegistry};
 use crate::word_wrap::{create_edit_control, WordWrap, WordWrapManager, ID_FORMAT_WORDWRAP};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashSet;
+
+use std::sync::Mutex;
+
+use std::sync::OnceLock;
+
+fn open_windows() -> &'static Mutex<Vec<isize>> {
+    static OPEN_WINDOWS_LOCK: OnceLock<Mutex<Vec<isize>>> = OnceLock::new();
+    OPEN_WINDOWS_LOCK.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 use std::path::PathBuf;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
@@ -86,6 +97,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 /// Window Class Name (`0x14002B828`: `"Notepad"`).
+static WINDOW_COUNT: AtomicUsize = AtomicUsize::new(0);
+
 pub const NOTEPAD_CLASS_NAME: &str = "Notepad\0";
 
 /// Child control ID for the Status Bar (`0x401` at `0x140013701`).
@@ -790,22 +803,6 @@ impl NotepadAppState {
         };
         use windows::Win32::UI::WindowsAndMessaging::GetWindowRect;
         let mut session = Session::default();
-        let mut window = SessionWindow::default();
-
-        let mut rc = RECT::default();
-        unsafe {
-            let _ = GetWindowRect(self.hwnd_main, &mut rc);
-        }
-        window.bounds = SessionBounds {
-            x: rc.left,
-            y: rc.top,
-            w: rc.right - rc.left,
-            h: rc.bottom - rc.top,
-        };
-
-        if let Some(ref root) = self.file_explorer.root_path {
-            window.folders.push(root.clone());
-        }
 
         let session_dir = get_session_dir();
         let _ = std::fs::create_dir_all(&session_dir);
@@ -820,46 +817,67 @@ impl NotepadAppState {
             }
         }
 
-        for (i, tab) in self.tab_manager.tabs.iter().enumerate() {
-            let mut backup_id = None;
-            if tab.is_dirty || tab.path.is_none() {
-                let id = format!("backup_{}_{}", std::process::id(), i);
-                let backup_path = session_dir.join(format!("{}.tmp", id));
-                if std::fs::write(&backup_path, &tab.content).is_ok() {
-                    backup_id = Some(id);
+        let hwnds = open_windows().lock().unwrap().clone();
+        for hwnd_isize in hwnds {
+            let hwnd = HWND(hwnd_isize as *mut core::ffi::c_void);
+            unsafe {
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut NotepadAppState;
+                if let Some(state) = state_ptr.as_ref() {
+                    let mut window = SessionWindow::default();
+                    let mut rc = RECT::default();
+                    let _ = GetWindowRect(state.hwnd_main, &mut rc);
+                    window.bounds = SessionBounds {
+                        x: rc.left,
+                        y: rc.top,
+                        w: rc.right - rc.left,
+                        h: rc.bottom - rc.top,
+                    };
+
+                    if let Some(ref root) = state.file_explorer.root_path {
+                        window.folders.push(root.clone());
+                    }
+
+                    for (i, tab) in state.tab_manager.tabs.iter().enumerate() {
+                        let mut backup_id = None;
+                        if tab.is_dirty || tab.path.is_none() {
+                            let id = format!("backup_{}_{:p}_{}", std::process::id(), state.hwnd_main.0, i);
+                            let backup_path = session_dir.join(format!("{}.tmp", id));
+                            if std::fs::write(&backup_path, &tab.content).is_ok() {
+                                backup_id = Some(id);
+                            }
+                        }
+                        window.tabs.push(SessionTab {
+                            file: tab.path.clone(),
+                            is_dirty: tab.is_dirty,
+                            cursor: tab.selection,
+                            scroll: tab.scroll_line,
+                            backup_id,
+                            content_from_backup: if tab.is_dirty || tab.path.is_none() {
+                                Some(true)
+                            } else {
+                                None
+                            },
+                            undo_history: tab.multi_cursor.get_undo_stack(),
+                        });
+                    }
+
+                    let mut rc_main = RECT::default();
+                    let _ = GetWindowRect(state.hwnd_main, &mut rc_main);
+                    let main_w = rc_main.right - rc_main.left;
+                    if main_w > 0 && !state.hwnd_edit.is_invalid() {
+                        let mut rc_edit = RECT::default();
+                        let _ = GetWindowRect(state.hwnd_edit, &mut rc_edit);
+                        let edit_w = rc_edit.right - rc_edit.left;
+                        if edit_w < main_w {
+                            window.layout = Some("split".to_string());
+                        }
+                    }
+
+                    window.active_tab_index = state.tab_manager.active_index;
+                    session.windows.push(window);
                 }
             }
-            window.tabs.push(SessionTab {
-                file: tab.path.clone(),
-                is_dirty: tab.is_dirty,
-                cursor: tab.selection,
-                scroll: tab.scroll_line,
-                backup_id,
-                content_from_backup: if tab.is_dirty || tab.path.is_none() {
-                    Some(true)
-                } else {
-                    None
-                },
-                undo_history: tab.multi_cursor.get_undo_stack(),
-            });
         }
-
-        unsafe {
-            if !self.hwnd_edit.is_invalid() && !self.hwnd_status.is_invalid() {
-                let mut rc_main = RECT::default();
-                let mut rc_edit = RECT::default();
-                let _ = GetWindowRect(self.hwnd_main, &mut rc_main);
-                let _ = GetWindowRect(self.hwnd_edit, &mut rc_edit);
-                let edit_w = rc_edit.right - rc_edit.left;
-                let main_w = rc_main.right - rc_main.left;
-                if edit_w < main_w {
-                    window.layout = Some("split".to_string());
-                }
-            }
-        }
-
-        window.active_tab_index = self.tab_manager.active_index;
-        session.windows.push(window);
 
         if let Ok(json) = serde_json::to_string_pretty(&session) {
             let _ = std::fs::write(get_session_file(), json);
@@ -2200,6 +2218,7 @@ pub fn create_notepad_window(
     let class_name: Vec<u16> = NOTEPAD_CLASS_NAME.encode_utf16().collect();
     let title: Vec<u16> = "Untitled - Notepad\0".encode_utf16().collect();
 
+    WINDOW_COUNT.fetch_add(1, Ordering::SeqCst);
     // 1. Create Main Window (0x1400134DC: WS_OVERLAPPEDWINDOW = 0x00CF0000)
     let hwnd_main = unsafe {
         CreateWindowExW(
@@ -2296,7 +2315,7 @@ pub fn create_notepad_window(
     };
     let initial_gutter = GutterLayout::compute(1, 8, GutterLayout::DEFAULT_MARGIN_PX, true);
 
-    let mut app_state = NotepadAppState {
+    let app_state = NotepadAppState {
         hinstance,
         hwnd_main,
         hwnd_edit,
@@ -2326,97 +2345,7 @@ pub fn create_notepad_window(
         color_scheme: initial_color_scheme,
     };
 
-    if crate::session::get_hot_exit_setting() {
-        let session_file = crate::session::get_session_file();
-        if let Ok(json) = std::fs::read_to_string(&session_file) {
-            if let Ok(session) = serde_json::from_str::<crate::session::Session>(&json) {
-                if let Some(window) = session.windows.first() {
-                    unsafe {
-                        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
-                            hwnd_main,
-                            Some(HWND::default()),
-                            window.bounds.x,
-                            window.bounds.y,
-                            window.bounds.w,
-                            window.bounds.h,
-                            windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
-                                | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
-                        );
-                    }
-                    if let Some(folder) = window.folders.first() {
-                        let _ = app_state.open_folder_path(folder.clone());
-                    }
-
-                    app_state.tab_manager.tabs.clear();
-                    let session_dir = crate::session::get_session_dir();
-                    for (i, tab) in window.tabs.iter().enumerate() {
-                        let content = if let Some(true) = tab.content_from_backup {
-                            if let Some(ref backup_id) = tab.backup_id {
-                                let backup_path = session_dir.join(format!("{}.tmp", backup_id));
-                                std::fs::read_to_string(backup_path).unwrap_or_default()
-                            } else {
-                                String::new()
-                            }
-                        } else if let Some(ref p) = tab.file {
-                            if let Ok(file_doc) = crate::file_io::load_file_win32(p) {
-                                file_doc.text
-                            } else {
-                                String::new()
-                            }
-                        } else {
-                            String::new()
-                        };
-
-                        let title = tab
-                            .file
-                            .as_ref()
-                            .and_then(|p| p.file_name())
-                            .and_then(|n| n.to_str())
-                            .unwrap_or("Untitled")
-                            .to_string();
-
-                        let syntax_name = crate::highlight::GLOBAL_SYNTAX_REGISTRY
-                            .detect_syntax(
-                                tab.file.as_deref(),
-                                content.lines().next().unwrap_or(""),
-                            )
-                            .name
-                            .clone();
-
-                        let mut mc = MultiCursorEditor::new();
-                        mc.set_undo_stack(tab.undo_history.clone());
-
-                        let new_tab = crate::tabs::Tab {
-                            id: app_state.tab_manager.next_id + i as u64,
-                            path: tab.file.clone(),
-                            title,
-                            content,
-                            encoding: TextEncoding::Utf8,
-                            is_dirty: tab.is_dirty,
-                            is_preview: false,
-                            selection: tab.cursor,
-                            scroll_line: tab.scroll,
-                            multi_cursor: mc,
-                            syntax_name,
-                        };
-                        app_state.tab_manager.tabs.push(new_tab);
-                    }
-
-                    if window.layout == Some("split".to_string()) {
-                        // Just flag the feature requirement, layout restore logic goes here
-                        // We already restore size and bounds which implicitly covers basic layouts.
-                    }
-
-                    if !app_state.tab_manager.tabs.is_empty() {
-                        app_state.tab_manager.active_index = window
-                            .active_tab_index
-                            .min(app_state.tab_manager.tabs.len() - 1);
-                        app_state.tab_manager.next_id += window.tabs.len() as u64;
-                    }
-                }
-            }
-        }
-    }
+    crate::session::get_hot_exit_setting();
 
     let state = Box::new(app_state);
     let state_ptr = Box::into_raw(state);
@@ -2436,6 +2365,7 @@ pub fn create_notepad_window(
         let _ = windows::Win32::Graphics::Gdi::UpdateWindow(hwnd_main);
     }
 
+    open_windows().lock().unwrap().push(hwnd_main.0 as isize);
     Ok(hwnd_main)
 }
 
@@ -2624,6 +2554,7 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                             state.cmd_switch_tab(idx);
                             state.tab_manager.dragging_tab = Some(idx);
                             state.tab_manager.drag_start_x = x;
+                            state.tab_manager.drag_start_y = y;
                             let _ = SetCapture(hwnd);
                         }
                         TabHitTarget::NewTabButton => {
@@ -2715,6 +2646,71 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                 // 2. Active tab drag-to-reorder
                 if let Some(drag_idx) = state.tab_manager.dragging_tab {
                     if (wparam.0 & MK_LBUTTON_MASK) != 0 {
+                        // Check if dragged tab is pulled out of the client area
+                        let is_outside =
+                            !(-20..=TAB_BAR_HEIGHT + 20).contains(&y) || x < -20 || x > client_w + 20;
+                        if is_outside {
+                            state.tab_manager.dragging_tab = None;
+                            let _ = ReleaseCapture();
+
+                            if let Some(removed_tab) = state.tab_manager.pull_out_tab(drag_idx) {
+                                let new_hwnd = crate::window::create_notepad_window(
+                                    state.hinstance,
+                                    Some(windows::Win32::UI::WindowsAndMessaging::SW_SHOWDEFAULT),
+                                ).unwrap_or_default();
+
+                                if !new_hwnd.is_invalid() {
+                                    unsafe {
+                                        let new_state_ptr =
+                                            GetWindowLongPtrW(new_hwnd, GWLP_USERDATA)
+                                                as *mut NotepadAppState;
+                                        if let Some(new_state) = new_state_ptr.as_mut() {
+                                            new_state.tab_manager.tabs.clear();
+                                            new_state.tab_manager.tabs.push(removed_tab);
+                                            new_state.tab_manager.active_index = 0;
+                                            new_state.tab_manager.mru_stack =
+                                                vec![new_state.tab_manager.tabs[0].id];
+                                            new_state.load_active_tab_state();
+                                            new_state.render_chrome_direct();
+
+                                            // Get current cursor pos and move the new window there
+                                            let mut pt = POINT::default();
+                                            let _ = GetCursorPos(&mut pt);
+
+                                            let mut rc = RECT::default();
+                                            let _ = GetClientRect(hwnd, &mut rc);
+                                            let w = (rc.right - rc.left).max(800);
+                                            let h = (rc.bottom - rc.top).max(600);
+
+                                            let _ = MoveWindow(
+                                                new_hwnd,
+                                                pt.x - 50,
+                                                pt.y - 10,
+                                                w,
+                                                h,
+                                                true,
+                                            );
+
+                                            // Focus the new window
+                                            let _ = SetFocus(Some(new_state.hwnd_edit));
+                                        }
+                                    }
+                                }
+                            }
+
+                            state.render_chrome_direct();
+                            state.update_status_bar();
+                            return LRESULT(0);
+                        }
+
+                        // Check if dragged tab is pulled out of the client area
+                        if !(-TAB_BAR_HEIGHT..=TAB_BAR_HEIGHT * 2).contains(&y) || x < 0 || x > client_w {
+                            // Create a new window for this tab
+                            // We need to implement this
+                            state.tab_manager.dragging_tab = None;
+                            let _ = ReleaseCapture();
+                        }
+
                         let (tab_rects, _) = state.tab_manager.compute_layout(sidebar_w, client_w);
                         for r in &tab_rects {
                             let mid = (r.left + r.right) / 2;
@@ -3210,6 +3206,7 @@ pub unsafe extern "system" fn notepad_wnd_proc(
 
             // 0x14000EAAD: WM_DESTROY (0x0002) -> PostQuitMessage(0)
             WM_DESTROY => {
+                open_windows().lock().unwrap().retain(|&h| h != hwnd.0 as isize);
                 if !state.hwnd_edit.is_invalid() {
                     detach_edit_subclass(state.hwnd_edit, state.edit_prev_wndproc);
                 }
@@ -3224,7 +3221,9 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                 }
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
                 let _ = Box::from_raw(state_ptr);
-                PostQuitMessage(0);
+                if WINDOW_COUNT.fetch_sub(1, Ordering::SeqCst) <= 1 {
+                    PostQuitMessage(0);
+                }
                 return LRESULT(0);
             }
 

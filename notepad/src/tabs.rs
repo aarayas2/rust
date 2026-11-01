@@ -179,6 +179,7 @@ pub struct TabManager {
     pub hover_new_btn: bool,
     pub dragging_tab: Option<usize>,
     pub drag_start_x: i32,
+    pub drag_start_y: i32,
     pub context_menu_tab: Option<usize>,
 }
 
@@ -202,6 +203,7 @@ impl TabManager {
             hover_new_btn: false,
             dragging_tab: None,
             drag_start_x: 0,
+            drag_start_y: 0,
             context_menu_tab: None,
         }
     }
@@ -376,7 +378,37 @@ impl TabManager {
     }
 
     /// Closes the tab at `index`. If the last remaining tab is closed, replaces it with a fresh
-    /// untitled tab (`close_windows_when_empty = false` on Windows).
+
+    /// Removes the tab at  and returns it. If the last remaining tab is removed,
+    /// replaces it with a fresh untitled tab ( on Windows).
+    pub fn pull_out_tab(&mut self, index: usize) -> Option<Tab> {
+        if index >= self.tabs.len() {
+            return None;
+        }
+        let removed = self.tabs.remove(index);
+        self.mru_stack.retain(|&id| id != removed.id);
+
+        if self.tabs.is_empty() {
+            let id = self.next_id;
+            self.next_id += 1;
+            self.tabs.push(Tab::new_untitled(id));
+            self.active_index = 0;
+            self.mru_stack.push(id);
+            return Some(removed);
+        }
+
+        if self.active_index > index {
+            self.active_index -= 1;
+        } else if self.active_index >= self.tabs.len() {
+            self.active_index = self.tabs.len() - 1;
+        }
+        let active_id = self.tabs[self.active_index].id;
+        self.touch_mru(active_id);
+        Some(removed)
+    }
+
+    /// Removes the tab at `index` and returns it. If the last remaining tab is removed,
+    /// replaces it with a fresh untitled tab (`close_windows_when_empty = false` on Windows).
     pub fn close_tab(&mut self, index: usize) {
         if index >= self.tabs.len() {
             return;
