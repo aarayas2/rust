@@ -1,4 +1,3 @@
-use std::os::windows::ffi::OsStrExt;
 //! Reverse-engineered Notepad Window Procedure (`NPWndProc`), Class Registration (`NPRegister`),
 //! Child Control Lifecycle (`NPInit` / `NPSize`), Command Dispatch (`NPCommand`),
 //! and Multi-Cursor / Block Selection Subclass & GDI Overlay Renderer.
@@ -54,8 +53,8 @@ use crate::scrollbar::apply_dark_scrollbar;
 use crate::tabs::{TabHitTarget, TabManager, TAB_BAR_HEIGHT};
 use crate::theme::{ColorScheme, GutterLayout, Theme, ThemePreset, ThemeRegistry};
 use crate::word_wrap::{create_edit_control, WordWrap, WordWrapManager, ID_FORMAT_WORDWRAP};
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashSet;
 
 use std::sync::Mutex;
 
@@ -841,12 +840,7 @@ impl NotepadAppState {
                     for (i, tab) in state.tab_manager.tabs.iter().enumerate() {
                         let mut backup_id = None;
                         if tab.is_dirty || tab.path.is_none() {
-                            let id = format!(
-                                "backup_{}_{:p}_{}",
-                                std::process::id(),
-                                state.hwnd_main.0,
-                                i
-                            );
+                            let id = format!("backup_{}_{:p}_{}", std::process::id(), state.hwnd_main.0, i);
                             let backup_path = session_dir.join(format!("{}.tmp", id));
                             if std::fs::write(&backup_path, &tab.content).is_ok() {
                                 backup_id = Some(id);
@@ -2653,9 +2647,8 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                 if let Some(drag_idx) = state.tab_manager.dragging_tab {
                     if (wparam.0 & MK_LBUTTON_MASK) != 0 {
                         // Check if dragged tab is pulled out of the client area
-                        let is_outside = !(-20..=TAB_BAR_HEIGHT + 20).contains(&y)
-                            || x < -20
-                            || x > client_w + 20;
+                        let is_outside =
+                            !(-20..=TAB_BAR_HEIGHT + 20).contains(&y) || x < -20 || x > client_w + 20;
                         if is_outside && state.tab_manager.tabs.len() > 1 {
                             state.tab_manager.dragging_tab = None;
                             let _ = ReleaseCapture();
@@ -2664,8 +2657,7 @@ pub unsafe extern "system" fn notepad_wnd_proc(
                                 let new_hwnd = crate::window::create_notepad_window(
                                     state.hinstance,
                                     Some(windows::Win32::UI::WindowsAndMessaging::SW_SHOWDEFAULT),
-                                )
-                                .unwrap_or_default();
+                                ).unwrap_or_default();
 
                                 if !new_hwnd.is_invalid() {
                                     unsafe {
@@ -3208,10 +3200,7 @@ pub unsafe extern "system" fn notepad_wnd_proc(
 
             // 0x14000EAAD: WM_DESTROY (0x0002) -> PostQuitMessage(0)
             WM_DESTROY => {
-                open_windows()
-                    .lock()
-                    .unwrap()
-                    .retain(|&h| h != hwnd.0 as isize);
+                open_windows().lock().unwrap().retain(|&h| h != hwnd.0 as isize);
                 if !state.hwnd_edit.is_invalid() {
                     detach_edit_subclass(state.hwnd_edit, state.edit_prev_wndproc);
                 }

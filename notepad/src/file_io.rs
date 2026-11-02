@@ -1,32 +1,31 @@
-use std::os::windows::ffi::OsStrExt;
-//! Reverse-engineered Win32 File I/O and Edit Control buffer synchronization.
-//!
-//! # Reverse Engineering Notes
-//!
-//! ## 1. `LoadFile` (`0x140010F48` - `0x140011867`) & `ReadFile` (`0x14000CA93`)
-//! - **File Handle:** Opened at `0x14000DEAA` via `CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)`.
-//! - **BOM Inspection (`0x140011173` - `0x1400111D5`):**
-//!   - `0xFEFF` (`FF FE` little-endian): UTF-16 LE (`encoding = 2`)
-//!   - `0xFFFE` (`FE FF` little-endian): UTF-16 BE (`encoding = 3`)
-//!   - `0xBBEF` + `0xBF` (`EF BB BF`): UTF-8 with BOM (`encoding = 4`, CodePage `0xFDE9` = 65001)
-//!   - Default: UTF-8 without BOM (`encoding = 5`, CodePage `0xFDE9` = 65001)
-//! - **Null Sanitization (`0x1400115AE` - `0x1400115C0`):**
-//!   Replaces any interior `0x0000` wide character with `0x0020` (`' '`) so the Win32
-//!   `Edit` control does not truncate the buffer at an embedded NUL.
-//! - **`.LOG` Header Detection (`0x1400115C2` - `0x1400115E5`):**
-//!   Checks if the first four wide characters are `'.' (0x2E)`, `'L' (0x4C)`, `'O' (0x4F)`, `'G' (0x47)`.
-//!   If matched, sets `fLog = 1` to append the current time/date on load.
-//! - **Reset Modify State (`0x14001161B` - `0x140011627`):**
-//!   Sends `EM_SETMODIFY` (`0x00B9`) with `wParam = 0` to `g_hwndEdit`.
-//!
-//! ## 2. `SaveFile` (`0x140011AF8` - `0x140011F20`)
-//! - **File Creation (`0x140011BE8`):**
-//!   Calls `CreateFileW(path, GENERIC_READ | GENERIC_WRITE (0xC0000000), FILE_SHARE_READ, NULL, OPEN_ALWAYS (4), FILE_ATTRIBUTE_NORMAL (0x80), NULL)`.
-//! - **Buffer Extraction (`0x140011C8A` - `0x140011CC6`):**
-//!   Queries `WM_GETTEXTLENGTH` (`0x0E`), locks the Edit control buffer (`EM_GETHANDLE` `0xBD` + `LocalLock`),
-//!   encodes according to the active `TextEncoding`, writes BOM + payload via `WriteFile`
-//!   (`0x140011D1C`, `0x140011E16`, `0x140011E70`, `0x140011EC7`, `0x140011EEB`, `0x140010D1F`),
-//!   and calls `SetEndOfFile` (`0x140011F0A`) to truncate any leftover trailing bytes.
+// Reverse-engineered Win32 File I/O and Edit Control buffer synchronization.
+//
+// # Reverse Engineering Notes
+//
+// ## 1. `LoadFile` (`0x140010F48` - `0x140011867`) & `ReadFile` (`0x14000CA93`)
+// - **File Handle:** Opened at `0x14000DEAA` via `CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL)`.
+// - **BOM Inspection (`0x140011173` - `0x1400111D5`):**
+//   - `0xFEFF` (`FF FE` little-endian): UTF-16 LE (`encoding = 2`)
+//   - `0xFFFE` (`FE FF` little-endian): UTF-16 BE (`encoding = 3`)
+//   - `0xBBEF` + `0xBF` (`EF BB BF`): UTF-8 with BOM (`encoding = 4`, CodePage `0xFDE9` = 65001)
+//   - Default: UTF-8 without BOM (`encoding = 5`, CodePage `0xFDE9` = 65001)
+// - **Null Sanitization (`0x1400115AE` - `0x1400115C0`):**
+//   Replaces any interior `0x0000` wide character with `0x0020` (`' '`) so the Win32
+//   `Edit` control does not truncate the buffer at an embedded NUL.
+// - **`.LOG` Header Detection (`0x1400115C2` - `0x1400115E5`):**
+//   Checks if the first four wide characters are `'.' (0x2E)`, `'L' (0x4C)`, `'O' (0x4F)`, `'G' (0x47)`.
+//   If matched, sets `fLog = 1` to append the current time/date on load.
+// - **Reset Modify State (`0x14001161B` - `0x140011627`):**
+//   Sends `EM_SETMODIFY` (`0x00B9`) with `wParam = 0` to `g_hwndEdit`.
+//
+// ## 2. `SaveFile` (`0x140011AF8` - `0x140011F20`)
+// - **File Creation (`0x140011BE8`):**
+//   Calls `CreateFileW(path, GENERIC_READ | GENERIC_WRITE (0xC0000000), FILE_SHARE_READ, NULL, OPEN_ALWAYS (4), FILE_ATTRIBUTE_NORMAL (0x80), NULL)`.
+// - **Buffer Extraction (`0x140011C8A` - `0x140011CC6`):**
+//   Queries `WM_GETTEXTLENGTH` (`0x0E`), locks the Edit control buffer (`EM_GETHANDLE` `0xBD` + `LocalLock`),
+//   encodes according to the active `TextEncoding`, writes BOM + payload via `WriteFile`
+//   (`0x140011D1C`, `0x140011E16`, `0x140011E70`, `0x140011EC7`, `0x140011EEB`, `0x140010D1F`),
+//   and calls `SetEndOfFile` (`0x140011F0A`) to truncate any leftover trailing bytes.
 
 use std::io;
 use std::os::windows::ffi::OsStrExt;

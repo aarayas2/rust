@@ -1,4 +1,3 @@
-use std::os::windows::ffi::OsStrExt;
 //! Reverse-engineered File Open & Save Dialog implementations matching Win32 Notepad.
 //!
 //! # Reverse Engineering Notes
