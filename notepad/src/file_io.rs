@@ -1,3 +1,4 @@
+use std::os::windows::ffi::OsStrExt;
 //! Reverse-engineered Win32 File I/O and Edit Control buffer synchronization.
 //!
 //! # Reverse Engineering Notes

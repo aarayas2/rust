@@ -1,851 +1,149 @@
-//! Entry point (`wWinMain` at `0x140010280`) and Message Loop (`0x1400103A3` - `0x140010489`)
-//! for the reverse-engineered Win32 Notepad clone.
-
-use notepad_win32::cursor::{BlockDirection, Position2D};
-use notepad_win32::file_explorer::DEFAULT_SIDEBAR_WIDTH;
-use notepad_win32::file_io::{
-    get_edit_text, load_file_win32, save_file_win32, set_edit_modified, set_edit_text, TextEncoding,
+use glutin::{
+    context::{ContextApi, ContextAttributesBuilder, Version},
+    display::{GetGlDisplay, GlDisplay},
+    prelude::*,
 };
-use notepad_win32::font::DEFAULT_WINDOWS_FONT_SIZE;
-use notepad_win32::menu::{
-    IDM_FILENEW, IDM_FILEOPEN, IDM_FILESAVE, IDM_FILE_CLOSE_TAB, IDM_FILE_OPEN_FOLDER,
-    IDM_TAB_NEXT, IDM_TAB_PREV, ID_EDIT_ADD_CURSOR_BELOW, ID_EDIT_ADD_CURSOR_NEXT_MATCH,
-    ID_EDIT_SELECTALL, ID_EDIT_SINGLE_CURSOR, ID_EDIT_TIMEDATE, ID_EDIT_UNDO,
-    ID_FORMAT_THEME_BREAKERS, ID_FORMAT_THEME_MARIANA, ID_FORMAT_THEME_MONOKAI,
-    ID_PREF_FONT_CASCADIA, ID_PREF_FONT_CONSOLAS, ID_PREF_FONT_LARGER, ID_PREF_FONT_RESET,
-    ID_PREF_FONT_SMALLER, ID_PREF_SHOW_FULL_PATH, ID_VIEW_LINE_NUMBERS, ID_VIEW_STATUS,
-    ID_VIEW_SYNTAX_JS, ID_VIEW_SYNTAX_PLAIN, ID_VIEW_SYNTAX_PYTHON, ID_VIEW_SYNTAX_RUST,
-    ID_VIEW_TOGGLE_SIDEBAR,
+use glutin_winit::{DisplayBuilder, GlWindow};
+use raw_window_handle::HasRawWindowHandle;
+use skia_safe::{
+    gpu::{gl::FramebufferInfo, BackendRenderTarget, SurfaceOrigin},
+    Color, ColorType, Surface,
 };
-use notepad_win32::theme::ThemePreset;
-use notepad_win32::window::{create_notepad_window, NotepadAppState};
-use notepad_win32::word_wrap::{WordWrap, ID_FORMAT_WORDWRAP};
 use std::path::PathBuf;
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, WPARAM};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    VK_ADD, VK_F5, VK_NUMPAD0, VK_OEM_MINUS, VK_OEM_PLUS, VK_SUBTRACT, VK_TAB,
+use winit::{
+    event::{Event, WindowEvent},
+    event_loop::{ControlFlow, EventLoop},
+    window::WindowBuilder,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateAcceleratorTableW, DestroyAcceleratorTable, DispatchMessageW, GetMessageW,
-    GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, SendMessageW, TranslateAcceleratorW,
-    TranslateMessage, ACCEL, FCONTROL, FSHIFT, FVIRTKEY, GWLP_USERDATA, HACCEL, MSG,
-    SW_SHOWDEFAULT, WM_CLOSE, WM_COMMAND, WM_INITMENU, WM_SIZE,
-};
-
-/// Builds the keyboard accelerator table (`Ctrl+N`, `Ctrl+O`, `Ctrl+Shift+O`, `Ctrl+S`, `Ctrl+W`,
-/// `Ctrl+Tab`, `Ctrl+Shift+Tab`, `Ctrl+B`, `Ctrl+Z`, `Ctrl+A`, `F5`)
-/// used by `TranslateAcceleratorW` at `0x1400103D9`.
-fn create_accelerators() -> Option<HACCEL> {
-    let accels = [
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: b'N' as u16,
-            cmd: IDM_FILENEW as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: b'O' as u16,
-            cmd: IDM_FILEOPEN as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL | FSHIFT,
-            key: b'O' as u16,
-            cmd: IDM_FILE_OPEN_FOLDER as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: b'S' as u16,
-            cmd: IDM_FILESAVE as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: b'W' as u16,
-            cmd: IDM_FILE_CLOSE_TAB as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: b'B' as u16,
-            cmd: ID_VIEW_TOGGLE_SIDEBAR as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: VK_TAB.0,
-            cmd: IDM_TAB_NEXT as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL | FSHIFT,
-            key: VK_TAB.0,
-            cmd: IDM_TAB_PREV as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: b'Z' as u16,
-            cmd: ID_EDIT_UNDO as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: b'A' as u16,
-            cmd: ID_EDIT_SELECTALL as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY,
-            key: VK_F5.0,
-            cmd: ID_EDIT_TIMEDATE as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: VK_OEM_PLUS.0,
-            cmd: ID_PREF_FONT_LARGER as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: VK_ADD.0,
-            cmd: ID_PREF_FONT_LARGER as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: VK_OEM_MINUS.0,
-            cmd: ID_PREF_FONT_SMALLER as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: VK_SUBTRACT.0,
-            cmd: ID_PREF_FONT_SMALLER as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: b'0' as u16,
-            cmd: ID_PREF_FONT_RESET as u16,
-        },
-        ACCEL {
-            fVirt: FVIRTKEY | FCONTROL,
-            key: VK_NUMPAD0.0,
-            cmd: ID_PREF_FONT_RESET as u16,
-        },
-    ];
-    unsafe { CreateAcceleratorTableW(&accels).ok() }
-}
-
-unsafe fn read_window_title(hwnd: HWND) -> String {
-    let len = GetWindowTextLengthW(hwnd);
-    if len <= 0 {
-        return String::new();
-    }
-    let mut buf = vec![0u16; (len as usize) + 1];
-    let read = GetWindowTextW(hwnd, &mut buf);
-    String::from_utf16_lossy(&buf[..read.max(0) as usize])
-}
-
-/// Runs an automated end-to-end verification of the Win32 window, child `"Edit"` control,
-/// `WM_SIZE`, `WM_INITMENU`, `WM_COMMAND` (Word Wrap recreation, Status Bar toggle, Time/Date),
-/// and `CreateFileW` / `ReadFile` / `WriteFile` disk I/O.
-fn run_automated_lifecycle_verification(hinstance: HINSTANCE) -> Result<(), String> {
-    println!("=== Notepad Win32 Lifecycle Automated Verification ===");
-
-    // 1. Create hidden Notepad window + child Edit control + Status Bar (NPRegister + NPInit)
-    let hwnd = create_notepad_window(hinstance, None)?;
-    println!(
-        "[OK] 1. Registered 'Notepad' class & created main HWND ({:?})",
-        hwnd
-    );
-
-    unsafe {
-        let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut NotepadAppState;
-        let state = state_ptr
-            .as_mut()
-            .ok_or("Missing NotepadAppState in GWLP_USERDATA")?;
-        println!(
-            "[OK] 2. Spawned child 'Edit' control ({:?}) and Status Bar ({:?})",
-            state.hwnd_edit, state.hwnd_status
-        );
-
-        // 2. Test WM_SIZE (0x14000EA6E -> NPSize 0x14000E848)
-        let lparam_size = LPARAM(((700isize) << 16) | 1024isize);
-        SendMessageW(hwnd, WM_SIZE, Some(WPARAM(0)), Some(lparam_size));
-        println!("[OK] 3. Verified WM_SIZE (1024x700) child control layout");
-
-        // 3. Test File I/O and Edit Buffer population (LoadFile / SaveFile)
-        let temp_file = std::env::temp_dir().join("notepad_lifecycle_verify.txt");
-        let sample_text = ".LOG\r\nHello from reverse-engineered Rust Notepad!";
-        save_file_win32(&temp_file, sample_text, TextEncoding::Utf8Bom)
-            .map_err(|e| e.to_string())?;
-        state.open_path(temp_file.clone())?;
-
-        let current_text = get_edit_text(state.hwnd_edit);
-        assert!(current_text.starts_with(".LOG\r\nHello from reverse-engineered Rust Notepad!"));
-        assert!(
-            current_text.len() > sample_text.len(),
-            ".LOG timestamp should be appended"
-        );
-        println!(
-            "[OK] 4. Verified CreateFileW/ReadFile/WriteFile, BOM, and .LOG timestamp injection"
-        );
-
-        // 4. Test WM_COMMAND: Word Wrap toggle & Edit control recreation (0x14000E1CE -> NPReCreate)
-        let old_edit = state.hwnd_edit;
-        assert_eq!(state.word_wrap.state(), WordWrap::Disabled);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_FORMAT_WORDWRAP as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.word_wrap.state(), WordWrap::Enabled);
-        assert_ne!(state.hwnd_edit, old_edit);
-        assert_eq!(get_edit_text(state.hwnd_edit), current_text);
-        println!(
-            "[OK] 5. Verified ID_FORMAT_WORDWRAP (0x20) recreated Edit HWND ({:?} -> {:?}) and preserved buffer",
-            old_edit, state.hwnd_edit
-        );
-
-        // 5. Test WM_INITMENU (0x14000ED6D -> InitMenu 0x14000F2A0)
-        SendMessageW(hwnd, WM_INITMENU, Some(WPARAM(0)), Some(LPARAM(0)));
-        println!("[OK] 6. Verified WM_INITMENU (0x14000F2A0) menu item state synchronization");
-
-        // 6. Test Status Bar toggle (ID_VIEW_STATUS = 0x1B)
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_VIEW_STATUS as usize)),
-            Some(LPARAM(0)),
-        );
-        assert!(!state.status_bar_visible);
-        println!("[OK] 7. Verified ID_VIEW_STATUS (0x1B) status bar visibility toggle");
-
-        // 7. Test Multi-Cursor & Block Selection integration (Step 3 verification)
-        set_edit_text(state.hwnd_edit, "item_a = 10\r\nitem_b = 20\r\nitem_c = 30");
-        state
-            .multi_cursor
-            .set_text("item_a = 10\r\nitem_b = 20\r\nitem_c = 30");
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_EDIT_ADD_CURSOR_BELOW as usize)),
-            Some(LPARAM(0)),
-        );
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_EDIT_ADD_CURSOR_BELOW as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.multi_cursor.cursors.count(), 3);
-        state.cmd_multi_insert_char('>');
-        assert_eq!(
-            get_edit_text(state.hwnd_edit),
-            ">item_a = 10\r\n>item_b = 20\r\n>item_c = 30"
-        );
-
-        // Collapse to single cursor and test rectangular Block Selection
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_EDIT_SINGLE_CURSOR as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.multi_cursor.cursors.count(), 1);
-        let col_pos = state.multi_cursor.pos_2d_to_byte(Position2D {
-            line: 0,
-            column: 10,
-        });
-        state
-            .multi_cursor
-            .cursors
-            .primary_mut()
-            .move_to(col_pos, false);
-        state.multi_cursor.block_select(BlockDirection::Down);
-        state.multi_cursor.block_select(BlockDirection::Down);
-        state.multi_cursor.block_select(BlockDirection::Right);
-        state.multi_cursor.block_select(BlockDirection::Right);
-        assert!(state.multi_cursor.cursors.has_block_selection());
-        state.multi_cursor.insert_text("99");
-        state.sync_to_hwnd_edit(true);
-        assert_eq!(
-            get_edit_text(state.hwnd_edit),
-            ">item_a = 99\r\n>item_b = 99\r\n>item_c = 99"
-        );
-
-        // Test Ctrl+D (ID_EDIT_ADD_CURSOR_NEXT_MATCH)
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_EDIT_SINGLE_CURSOR as usize)),
-            Some(LPARAM(0)),
-        );
-        state.multi_cursor.cursors.primary_mut().move_to(1, false);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_EDIT_ADD_CURSOR_NEXT_MATCH as usize)),
-            Some(LPARAM(0)),
-        );
-        println!(
-            "[OK] 8. Verified Multi-Cursor (Ctrl+Alt+Down, Ctrl+D) & Block Selection (Shift+Alt+Arrows) state and HWND sync"
-        );
-
-        // 8. Test Sublime-inspired Theme Presets & Line-Number Gutter Layout
-        assert_eq!(state.theme_preset, ThemePreset::MarianaDark);
-        assert!(state.line_numbers_visible);
-        assert_eq!(state.gutter_layout.digit_count, 2);
-        let width_2_digits = state.gutter_layout.total_width;
-        assert!(width_2_digits > 0);
-
-        // Switch theme to Monokai Dark & Breakers Light and back to Mariana Dark
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_FORMAT_THEME_MONOKAI as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.theme_preset, ThemePreset::MonokaiDark);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_FORMAT_THEME_BREAKERS as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.theme_preset, ThemePreset::BreakersLight);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_FORMAT_THEME_MARIANA as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.theme_preset, ThemePreset::MarianaDark);
-
-        // Populate 120 lines and verify dynamic gutter expansion from 2 digits to 3 digits
-        let many_lines: String = (1..=120)
-            .map(|i| format!("line {}", i))
-            .collect::<Vec<_>>()
-            .join("\r\n");
-        state.multi_cursor.set_text(many_lines);
-        state.sync_to_hwnd_edit(false);
-        assert_eq!(state.gutter_layout.digit_count, 3);
-        assert!(
-            state.gutter_layout.total_width > width_2_digits,
-            "Gutter width must expand when crossing 99 -> 120 lines"
-        );
-
-        // Toggle line numbers off and back on
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_VIEW_LINE_NUMBERS as usize)),
-            Some(LPARAM(0)),
-        );
-        assert!(!state.line_numbers_visible);
-        assert_eq!(state.gutter_layout.total_width, 0);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_VIEW_LINE_NUMBERS as usize)),
-            Some(LPARAM(0)),
-        );
-        assert!(state.line_numbers_visible);
-        assert!(state.gutter_layout.total_width > width_2_digits);
-        println!(
-            "[OK] 9. Verified Sublime Theme Presets (Mariana/Monokai/Breakers) & Dynamic Line-Number Gutter (2 -> 3 digits: {}px -> {}px)",
-            width_2_digits, state.gutter_layout.total_width
-        );
-
-        // 9. Test Sublime Font Scaling (`Preferences > Font > Larger / Smaller / Reset Size`) & Dynamic Window Title
-        assert_eq!(state.font_state.font_size, DEFAULT_WINDOWS_FONT_SIZE);
-        let gutter_width_11pt = state.gutter_layout.total_width;
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_PREF_FONT_LARGER as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.font_state.font_size, 12);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_PREF_FONT_LARGER as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.font_state.font_size, 13);
-        let gutter_width_13pt = state.gutter_layout.total_width;
-        assert!(
-            gutter_width_13pt >= gutter_width_11pt,
-            "Gutter width should scale with font size"
-        );
-
-        // Verify dynamic window title includes full path, dirty bullet (` •`), and `[13pt]` scale badge
-        set_edit_modified(state.hwnd_edit, true);
-        state.update_window_title();
-        let title_13pt = read_window_title(hwnd);
-        assert!(
-            title_13pt.contains("notepad_lifecycle_verify.txt \u{2022} [13pt] - Notepad"),
-            "Unexpected title at 13pt: {}",
-            title_13pt
-        );
-
-        // Toggle `show_full_path` off and verify filename-only title
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_PREF_SHOW_FULL_PATH as usize)),
-            Some(LPARAM(0)),
-        );
-        assert!(!state.show_full_path);
-        let title_short = read_window_title(hwnd);
-        assert_eq!(
-            title_short,
-            "notepad_lifecycle_verify.txt \u{2022} [13pt] - Notepad"
-        );
-
-        // Test `Smaller` and `Reset Size` (`0x1400FECCA` & `0x1400FED9E`) and font family switch
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_PREF_FONT_SMALLER as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.font_state.font_size, 12);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_PREF_FONT_RESET as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.font_state.font_size, DEFAULT_WINDOWS_FONT_SIZE);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_PREF_FONT_CASCADIA as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.font_state.font_face, "Cascadia Mono");
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_PREF_FONT_CONSOLAS as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.font_state.font_face, "Consolas");
-        println!(
-            "[OK] 10. Verified Sublime Font Scaling (Larger/Smaller/Reset: 11pt -> 13pt -> 11pt, gutter {}px -> {}px) & Dynamic Window Title ('{}')",
-            gutter_width_11pt, gutter_width_13pt, title_short
-        );
-
-        // 10. Test Multi-Tab (`File > New`, switching, reordering, dirty `*`, `Ctrl+Tab`, closing)
-        //     and `File > Open Folder` (`D:\test` -> left pane tree -> preview vs pinned tab)
-        let test_folder = PathBuf::from("test_files");
-        let created_d_test = !test_folder.exists();
-        let _ = std::fs::create_dir_all(&test_folder);
-        let file_alpha = test_folder.join("alpha.txt");
-        let file_beta = test_folder.join("beta.rs");
-        save_file_win32(&file_alpha, "Alpha file content", TextEncoding::Utf8)
-            .map_err(|e| e.to_string())?;
-        save_file_win32(&file_beta, "fn beta() -> u32 { 42 }", TextEncoding::Utf8)
-            .map_err(|e| e.to_string())?;
-
-        // Open Folder `D:\test` -> left pane tree becomes visible at 250px
-        state.open_folder_path(test_folder.clone())?;
-        assert!(state.file_explorer.is_visible);
-        assert_eq!(state.file_explorer.effective_width(), DEFAULT_SIDEBAR_WIDTH);
-        let tree_names: Vec<String> = state
-            .file_explorer
-            .flat_rows
-            .iter()
-            .map(|r| r.name.clone())
-            .collect();
-        assert!(tree_names.contains(&"alpha.txt".to_string()));
-        assert!(tree_names.contains(&"beta.rs".to_string()));
-
-        // Ensure current tab is clean so it doesn't prompt when switching/closing
-        set_edit_modified(state.hwnd_edit, false);
-        state.sync_from_hwnd_edit();
-
-        // Single-click `alpha.txt` in tree -> opens in preview tab (`is_preview = true`)
-        state.open_path_with_mode(file_alpha.clone(), true)?;
-        assert!(state.tab_manager.active_tab().is_preview);
-        assert_eq!(state.tab_manager.active_tab().title, "alpha.txt");
-
-        // Single-click `beta.rs` in tree -> replaces unmodified preview tab in-place!
-        let tab_count_before = state.tab_manager.tabs.len();
-        state.open_path_with_mode(file_beta.clone(), true)?;
-        assert_eq!(state.tab_manager.tabs.len(), tab_count_before);
-        assert!(state.tab_manager.active_tab().is_preview);
-        assert_eq!(state.tab_manager.active_tab().title, "beta.rs");
-        assert_eq!(get_edit_text(state.hwnd_edit), "fn beta() -> u32 { 42 }");
-
-        // Edit `beta.rs` -> auto-pins preview tab (`is_preview = false`) and displays `*` dirty indicator
-        set_edit_text(state.hwnd_edit, "fn beta() -> u32 { 99 }");
-        set_edit_modified(state.hwnd_edit, true);
-        state.sync_from_hwnd_edit();
-        assert!(!state.tab_manager.active_tab().is_preview);
-        assert!(state.tab_manager.active_tab().is_dirty);
-        assert_eq!(state.tab_manager.active_tab().display_label(), "beta.rs *");
-
-        // `File > New` (`IDM_FILENEW`) -> creates a new tab
-        let count_before_new = state.tab_manager.tabs.len();
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(IDM_FILENEW as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.tab_manager.tabs.len(), count_before_new + 1);
-        assert_eq!(state.tab_manager.active_tab().title, "Untitled");
-
-        // `Ctrl+Tab` (`IDM_TAB_NEXT`) & `Ctrl+Shift+Tab` (`IDM_TAB_PREV`) switch tabs and preserve buffers
-        let idx_before = state.tab_manager.active_index;
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(IDM_TAB_PREV as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_ne!(state.tab_manager.active_index, idx_before);
-        assert_eq!(get_edit_text(state.hwnd_edit), "fn beta() -> u32 { 99 }");
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(IDM_TAB_NEXT as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.tab_manager.active_index, idx_before);
-
-        // Drag-to-reorder tabs and close tab (`Ctrl+W` / `IDM_FILE_CLOSE_TAB`)
-        assert!(state.tab_manager.reorder_tab(idx_before, 0));
-        assert_eq!(state.tab_manager.active_index, 0);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(IDM_FILE_CLOSE_TAB as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.tab_manager.tabs.len(), count_before_new);
-
-        // Toggle Side Bar (`View > Toggle Side Bar` / `ID_VIEW_TOGGLE_SIDEBAR`)
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_VIEW_TOGGLE_SIDEBAR as usize)),
-            Some(LPARAM(0)),
-        );
-        assert!(!state.file_explorer.is_visible);
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_VIEW_TOGGLE_SIDEBAR as usize)),
-            Some(LPARAM(0)),
-        );
-        assert!(state.file_explorer.is_visible);
-        println!(
-            "[OK] 11. Verified Multi-Tab (New/Switch/Reorder/Close/Dirty '*') & Open Folder ('D:\\test' left tree, preview vs pinned tab, Ctrl+Tab)"
-        );
-
-        // 10b. Test Syntax Highlighting, Syntax Definitions (auto-detect + View > Select Syntax),
-        //      and Color Themes (Mariana .sublime-color-scheme + Monokai .tmTheme) using `test_files\`
-        for (rel_path, expected_syntax) in [
-            ("test_files/sample.rs", "Rust"),
-            ("test_files/sample.js", "JavaScript"),
-            ("test_files/sample.py", "Python"),
-        ] {
-            let sample_path = PathBuf::from(rel_path);
-            assert!(
-                sample_path.exists(),
-                "Sample test file {} must exist",
-                rel_path
-            );
-            state.open_path(sample_path)?;
-            assert_eq!(
-                state.highlight_cache.syntax_name(),
-                expected_syntax,
-                "Auto-detected syntax for {} must be {}",
-                rel_path,
-                expected_syntax
-            );
-            state
-                .highlight_cache
-                .ensure_highlighted_up_to(&notepad_win32::GLOBAL_SYNTAX_REGISTRY, 50);
-
-            let mut saw_comment = false;
-            let mut saw_keyword = false;
-            let mut saw_string = false;
-            for line_idx in 0..state.highlight_cache.line_count() {
-                for tok in state.highlight_cache.line_tokens(line_idx) {
-                    if tok.scope.contains("comment.line") {
-                        saw_comment = true;
-                    }
-                    if tok.scope.contains("keyword.control") {
-                        saw_keyword = true;
-                    }
-                    if tok.scope.contains("string.quoted") {
-                        saw_string = true;
-                    }
-                }
-            }
-            assert!(
-                saw_comment,
-                "{} must tokenize `comment.line` scopes",
-                rel_path
-            );
-            assert!(
-                saw_keyword,
-                "{} must tokenize `keyword.control` scopes",
-                rel_path
-            );
-            assert!(
-                saw_string,
-                "{} must tokenize `string.quoted` scopes",
-                rel_path
-            );
-        }
-
-        // Test manual `View > Select Syntax` commands
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_VIEW_SYNTAX_PLAIN as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.highlight_cache.syntax_name(), "Plain Text");
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_VIEW_SYNTAX_RUST as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.highlight_cache.syntax_name(), "Rust");
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_VIEW_SYNTAX_JS as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.highlight_cache.syntax_name(), "JavaScript");
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_VIEW_SYNTAX_PYTHON as usize)),
-            Some(LPARAM(0)),
-        );
-        assert_eq!(state.highlight_cache.syntax_name(), "Python");
-
-        // Test live theme switching between Mariana (.sublime-color-scheme) and Monokai (.tmTheme)
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_FORMAT_THEME_MONOKAI as usize)),
-            Some(LPARAM(0)),
-        );
-        let monokai_kw_fg = state
-            .color_scheme
-            .style_for_scope("keyword.control")
-            .foreground;
-        SendMessageW(
-            hwnd,
-            WM_COMMAND,
-            Some(WPARAM(ID_FORMAT_THEME_MARIANA as usize)),
-            Some(LPARAM(0)),
-        );
-        let mariana_kw_fg = state
-            .color_scheme
-            .style_for_scope("keyword.control")
-            .foreground;
-        assert_ne!(
-            monokai_kw_fg, mariana_kw_fg,
-            "Monokai (.tmTheme) and Mariana (.sublime-color-scheme) must apply distinct keyword.control colors"
-        );
-        state.render_syntax_highlighted_viewport();
-        println!(
-            "[OK] 12. Verified Syntax Highlighting (Syntect + Ropey cache <16ms), Auto-Detection (`test_files/sample.{{rs,js,py}}`), View > Select Syntax, & Live Theme Switching (.sublime-color-scheme / .tmTheme)"
-        );
-
-        // 11. Clean up modifications and close window (WM_CLOSE -> WM_DESTROY -> PostQuitMessage)
-        for tab in &mut state.tab_manager.tabs {
-            tab.is_dirty = false;
-        }
-        set_edit_modified(state.hwnd_edit, false);
-        set_edit_text(state.hwnd_edit, "");
-        let _ = std::fs::remove_file(&temp_file);
-        let _ = std::fs::remove_file(&file_alpha);
-        let _ = std::fs::remove_file(&file_beta);
-        if created_d_test {
-            let _ = std::fs::remove_dir(&test_folder);
-        }
-        SendMessageW(hwnd, WM_CLOSE, Some(WPARAM(0)), Some(LPARAM(0)));
-
-        // Drain the queued WM_QUIT message posted by PostQuitMessage(0)
-        let mut msg = MSG::default();
-        let _ = GetMessageW(&mut msg, None, 0, 0);
-        println!("[OK] 12. Verified WM_CLOSE -> WM_DESTROY -> PostQuitMessage(0) teardown");
-    }
-
-    println!("=== All Win32 Lifecycle Checks Passed! ===");
-    Ok(())
-}
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
+    let event_loop = EventLoop::new().unwrap();
+    let window_builder = WindowBuilder::new()
+        .with_title("Notepad (Skia + Winit)")
+        .with_inner_size(winit::dpi::LogicalSize::new(800.0, 600.0));
 
-    let hmodule = unsafe { GetModuleHandleW(None).unwrap_or_default() };
-    let hinstance = HINSTANCE(hmodule.0);
+    let template = glutin::config::ConfigTemplateBuilder::new();
+    let display_builder = DisplayBuilder::new().with_window_builder(Some(window_builder));
 
-    if args.iter().any(|a| a == "--self-test") {
-        if let Err(e) = run_automated_lifecycle_verification(hinstance) {
-            eprintln!("Lifecycle verification failed: {}", e);
-            std::process::exit(1);
-        }
-        return;
-    }
-
-    // Standard GUI launch (WinMain at 0x140010280)
-    // We want to check the session to see if there are multiple windows.
-    // If so, create them. `create_notepad_window` handles creating the first window and restoring its session state.
-    // We should spawn the remaining windows if they exist in the session.
-    
-    let mut _initial_hwnd: HWND = HWND::default();
-    
-    let session_file = notepad_win32::session::get_session_file();
-    let mut _num_windows_to_spawn = 1;
-    let mut session_data = None;
-    if let Ok(json) = std::fs::read_to_string(&session_file) {
-        if let Ok(session) = serde_json::from_str::<notepad_win32::session::Session>(&json) {
-            _num_windows_to_spawn = session.windows.len().max(1);
-            session_data = Some(session);
-        }
-    }
-
-    let hwnd = match create_notepad_window(hinstance, Some(SW_SHOWDEFAULT)) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("Failed to initialize Notepad window: {}", e);
-            std::process::exit(1);
-        }
-    };
-    _initial_hwnd = hwnd;
-    
-    if let Some(session) = session_data {
-        for (i, window_state) in session.windows.into_iter().enumerate() {
-            let new_hwnd = if i == 0 {
-                _initial_hwnd
-            } else {
-                match create_notepad_window(hinstance, Some(SW_SHOWDEFAULT)) {
-                    Ok(h) => h,
-                    Err(_) => continue,
-                }
-            };
-            
-            if !new_hwnd.is_invalid() {
-
-                unsafe {
-                    let state_ptr = GetWindowLongPtrW(new_hwnd, GWLP_USERDATA) as *mut notepad_win32::window::NotepadAppState;
-                    if let Some(state) = state_ptr.as_mut() {
-                        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
-                            new_hwnd,
-                            Some(HWND::default()),
-                            window_state.bounds.x,
-                            window_state.bounds.y,
-                            window_state.bounds.w,
-                            window_state.bounds.h,
-                            windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER
-                                | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE,
-                        );
-                        if let Some(folder) = window_state.folders.first() {
-                            let _ = state.open_folder_path(folder.clone());
-                        }
-                        
-                        // We also need to restore tabs for this window
-                        state.tab_manager.tabs.clear();
-                        state.tab_manager.mru_stack.clear();
-                        
-                        let session_dir = notepad_win32::session::get_session_dir();
-                        let mut next_id = 1;
-                        for session_tab in window_state.tabs {
-                            let mut tab = notepad_win32::tabs::Tab::new_untitled(next_id);
-                            if let Some(file) = session_tab.file {
-                                tab.title = file
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("Untitled")
-                                    .to_string();
-                                tab.path = Some(file);
-                            }
-                            tab.is_dirty = session_tab.is_dirty;
-                            tab.selection = session_tab.cursor;
-                            tab.scroll_line = session_tab.scroll;
-                            if let Some(backup_id) = session_tab.backup_id {
-                                let mut tmp_path = session_dir.clone();
-                                tmp_path.push(format!("{}.tmp", backup_id));
-                                if let Ok(content) = std::fs::read_to_string(&tmp_path) {
-                                    tab.content = content;
-                                }
-                            } else if let Some(ref path) = tab.path {
-                                if let Ok(doc) = notepad_win32::file_io::load_file_win32(path) {
-                                    tab.content = doc.text;
-                                    tab.encoding = doc.encoding;
-                                }
-                            }
-                            tab.syntax_name = notepad_win32::highlight::GLOBAL_SYNTAX_REGISTRY
-                                .detect_syntax(tab.path.as_deref(), tab.content.lines().next().unwrap_or(""))
-                                .name
-                                .clone();
-                            state.tab_manager.tabs.push(tab);
-                            state.tab_manager.mru_stack.push(next_id);
-                            next_id += 1;
-                        }
-                        if state.tab_manager.tabs.is_empty() {
-                            state.tab_manager.tabs.push(notepad_win32::tabs::Tab::new_untitled(next_id));
-                            state.tab_manager.mru_stack.push(next_id);
-                            next_id += 1;
-                        }
-                        state.tab_manager.next_id = next_id;
-                        state.tab_manager.active_index = window_state.active_tab_index.min(state.tab_manager.tabs.len().saturating_sub(1));
-                        
-                        state.load_active_tab_state();
-                        state.render_chrome_direct();
-                    }
-                }
-            }
-        }
-    }
-
-
-    // If a file or folder path was passed on the command line, open it immediately
-    if let Some(path_arg) = args.get(1).filter(|a| !a.starts_with("--")) {
-        let path = PathBuf::from(path_arg);
-        if path.exists() {
-            unsafe {
-                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut NotepadAppState;
-                if let Some(state) = state_ptr.as_mut() {
-                    if path.is_dir() {
-                        let _ = state.open_folder_path(path);
+    let (window, gl_config) = display_builder
+        .build(&event_loop, template, |configs| {
+            configs
+                .reduce(|accum, config| {
+                    if config.num_samples() > accum.num_samples() {
+                        config
                     } else {
-                        let _ = state.open_path(path);
+                        accum
                     }
-                }
-            }
-        } else if let Ok(doc) = load_file_win32(&path) {
-            let _ = doc;
-        }
-    }
+                })
+                .unwrap()
+        })
+        .unwrap();
 
-    let haccel = create_accelerators();
+    let window = window.unwrap();
 
-    // WinMain Message Loop (0x1400103A3 - 0x140010489)
-    unsafe {
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            let translated = if let Some(acc) = haccel {
-                TranslateAcceleratorW(hwnd, acc, &msg) != 0
-            } else {
-                false
+    let raw_window_handle = Some(window.raw_window_handle());
+    let context_attributes = ContextAttributesBuilder::new().build(raw_window_handle);
+
+    let fallback_context_attributes = ContextAttributesBuilder::new()
+        .with_context_api(ContextApi::Gles(None))
+        .build(raw_window_handle);
+
+    let not_current_gl_context = unsafe {
+        gl_config
+            .display()
+            .create_context(&gl_config, &context_attributes)
+            .unwrap_or_else(|_| {
+                gl_config
+                    .display()
+                    .create_context(&gl_config, &fallback_context_attributes)
+                    .expect("failed to create context")
+            })
+    };
+
+    let (width, height): (u32, u32) = window.inner_size().into();
+    let attrs = glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new()
+        .build(
+            window.raw_window_handle(),
+            std::num::NonZeroU32::new(width).unwrap(),
+            std::num::NonZeroU32::new(height).unwrap(),
+        );
+
+    let gl_surface = unsafe {
+        gl_config
+            .display()
+            .create_window_surface(&gl_config, &attrs)
+            .unwrap()
+    };
+
+    let gl_context = not_current_gl_context.make_current(&gl_surface).unwrap();
+
+    gl::load_with(|s| {
+        gl_config
+            .display()
+            .get_proc_address(std::ffi::CString::new(s).unwrap().as_c_str())
+    });
+
+    let mut gr_context =
+        skia_safe::gpu::DirectContext::new_gl(None, None).expect("Failed to create GrContext");
+
+    let mut create_surface =
+        |window: &winit::window::Window, gr_context: &mut skia_safe::gpu::DirectContext| {
+            let (width, height): (u32, u32) = window.inner_size().into();
+            let mut fboid = 0;
+            unsafe { gl::GetIntegerv(gl::FRAMEBUFFER_BINDING, &mut fboid) };
+
+            let fb_info = FramebufferInfo {
+                fboid: fboid.try_into().unwrap(),
+                format: skia_safe::gpu::gl::Format::RGBA8.into(),
             };
 
-            if !translated {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
+            let backend_render_target =
+                BackendRenderTarget::new_gl((width as i32, height as i32), Some(1), 0, fb_info);
 
-        if let Some(acc) = haccel {
-            let _ = DestroyAcceleratorTable(acc);
-        }
-    }
+            Surface::from_backend_render_target(
+                gr_context,
+                &backend_render_target,
+                SurfaceOrigin::BottomLeft,
+                ColorType::RGBA8888,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+
+    let mut surface = create_surface(&window, &mut gr_context);
+
+    event_loop
+        .run(move |event, window_target| {
+            match event {
+                Event::WindowEvent { event, .. } => match event {
+                    WindowEvent::CloseRequested => window_target.exit(),
+                    WindowEvent::Resized(physical_size) => {
+                        if physical_size.width != 0 && physical_size.height != 0 {
+                            gl_surface.resize(
+                                &gl_context,
+                                std::num::NonZeroU32::new(physical_size.width).unwrap(),
+                                std::num::NonZeroU32::new(physical_size.height).unwrap(),
+                            );
+                            surface = create_surface(&window, &mut gr_context);
+                            window.request_redraw();
+                        }
+                    }
+                    WindowEvent::RedrawRequested => {
+                        let canvas = surface.canvas();
+                        canvas.clear(Color::WHITE);
+                        // Drawing logic will be migrated here
+
+                        gr_context.flush_and_submit();
+                        gl_surface.swap_buffers(&gl_context).unwrap();
+                    }
+                    _ => (),
+                },
+                Event::AboutToWait => {
+                    // window.request_redraw();
+                }
+                _ => (),
+            }
+        })
+        .unwrap();
 }
