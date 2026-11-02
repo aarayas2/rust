@@ -27,6 +27,57 @@ pub const MAX_PATH_LEN: usize = 260;
 /// `"Text Documents (*.txt)\0*.txt\0All Files (*.*)\0*.*\0\0"`
 pub const DEFAULT_NOTEPAD_FILTER: &str = "Text Documents (*.txt)\0*.txt\0All Files (*.*)\0*.*\0\0";
 
+/// Open dialog file filter containing common code and text files:
+pub const OPEN_DIALOG_FILTER: &str = concat!(
+    "All Files (*.*)\0*.*\0",
+    "ASP (*.vbs)\0*.vbs\0",
+    "ActionScript 2.0 (*.as)\0*.as\0",
+    "AppleScript (*.applescript)\0*.applescript\0",
+    "Bash (*.sh; *.bash)\0*.sh;*.bash\0",
+    "Batch File (*.bat; *.cmd)\0*.bat;*.cmd\0",
+    "BibTeX (*.bib)\0*.bib\0",
+    "C (*.c; *.h)\0*.c;*.h\0",
+    "C# (*.cs; *.csx)\0*.cs;*.csx\0",
+    "C++ (*.cpp; *.cc; *.h; *.hpp; *.ino)\0*.cpp;*.cc;*.h;*.hpp;*.ino\0",
+    "CSS (*.css)\0*.css\0",
+    "Cabal (*.cabal)\0*.cabal\0",
+    "Cassandra (*.cql)\0*.cql\0",
+    "Clojure (*.clj; *.cljs; *.edn)\0*.clj;*.cljs;*.edn\0",
+    "ClojureScript (*.cljs; *.cljc)\0*.cljs;*.cljc\0",
+    "D (*.d; *.di)\0*.d;*.di\0",
+    "DTD (*.dtd)\0*.dtd\0",
+    "Dart (*.dart)\0*.dart\0",
+    "Diff (*.diff; *.patch)\0*.diff;*.patch\0",
+    "Erlang (*.erl; *.hrl)\0*.erl;*.hrl\0",
+    "Git Attributes (.gitattributes)\0.gitattributes\0",
+    "Git Config (.gitconfig)\0.gitconfig\0",
+    "Git Ignore (.gitignore)\0.gitignore\0",
+    "Go (*.go)\0*.go\0",
+    "HTML (*.html; *.htm)\0*.html;*.htm\0",
+    "JSON (*.json)\0*.json\0",
+    "Java (*.java)\0*.java\0",
+    "JavaScript (*.js; *.mjs; *.cjs)\0*.js;*.mjs;*.cjs\0",
+    "Kotlin (*.kt; *.kts)\0*.kt;*.kts\0",
+    "Lua (*.lua)\0*.lua\0",
+    "Markdown (*.md; *.markdown)\0*.md;*.markdown\0",
+    "PHP (*.php)\0*.php\0",
+    "Perl (*.pl; *.pm)\0*.pl;*.pm\0",
+    "PowerShell (*.ps1; *.psm1; *.psd1)\0*.ps1;*.psm1;*.psd1\0",
+    "Python (*.py; *.pyw; *.pyi)\0*.py;*.pyw;*.pyi\0",
+    "R (*.r; *.R; *.Rmd)\0*.r;*.R;*.Rmd\0",
+    "Ruby (*.rb; *.erb)\0*.rb;*.erb\0",
+    "Rust (*.rs)\0*.rs\0",
+    "SQL (*.sql)\0*.sql\0",
+    "Shell (*.sh; *.zsh)\0*.sh;*.zsh\0",
+    "Swift (*.swift)\0*.swift\0",
+    "TOML (*.toml)\0*.toml\0",
+    "Text (*.txt; *.log; *.csv)\0*.txt;*.log;*.csv\0",
+    "TypeScript (*.ts; *.tsx)\0*.ts;*.tsx\0",
+    "XML (*.xml; *.xsd; *.xsl)\0*.xml;*.xsd;*.xsl\0",
+    "YAML (*.yaml; *.yml)\0*.yaml;*.yml\0",
+    "\0"
+);
+
 /// Dialog error representation.
 #[derive(Debug, PartialEq, Eq)]
 pub enum SaveDialogError {
@@ -117,7 +168,7 @@ impl<'a> OpenFileDialog<'a> {
         Self {
             owner,
             default_extension: "txt",
-            filter: DEFAULT_NOTEPAD_FILTER,
+            filter: OPEN_DIALOG_FILTER,
             initial_file: None,
             flags: OFN_FILEMUSTEXIST
                 | OFN_PATHMUSTEXIST
@@ -223,11 +274,17 @@ mod tests {
     fn test_open_dialog_builder_defaults() {
         let dialog = OpenFileDialog::new(HWND::default());
         assert_eq!(dialog.default_extension, "txt");
-        assert_eq!(dialog.filter, DEFAULT_NOTEPAD_FILTER);
+        assert_eq!(dialog.filter, OPEN_DIALOG_FILTER);
     }
 
     #[test]
     fn test_filter_format() {
         assert!(DEFAULT_NOTEPAD_FILTER.ends_with("\0\0"));
+    }
+
+    #[test]
+    fn test_open_dialog_filter_format() {
+        assert!(OPEN_DIALOG_FILTER.ends_with("\0\0"));
+        assert!(OPEN_DIALOG_FILTER.starts_with("All Files (*.*)\0*.*\0"));
     }
 }
